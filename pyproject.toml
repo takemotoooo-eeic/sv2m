@@ -1,0 +1,63 @@
+[project]
+name = "sv2m"
+description = "A package to retrieve music track for short video."
+readme = "README.md"
+requires-python = ">=3.10, <4"
+dependencies = [
+    "boto3<1.36",
+    "botocore",
+    "hydra-core",
+    "lxml",
+    "matplotlib",
+    "omegaconf",
+    "packaging",
+    "pyhive",
+    "sentence-transformers<5.4",
+    "tensorboard",
+    "torch>=2.9",
+    "torchaudio",
+    "torchcodec>=0.9",
+    "torchvision",
+    "tqdm",
+    "transformers",
+    "webdataset",
+]
+dynamic = [
+    "version",
+]
+
+[project.scripts]
+sv2m-parse-run-command = "sv2m.bin.parse_run_command:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "sv2m.__version__"}
+
+[tool.setuptools.packages.find]
+include = [
+    "sv2m*",
+]
+
+[tool.ruff]
+line-length = 99
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+]
+
+[tool.ruff.lint.isort]
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]

@@ -1,0 +1,15 @@
+defaults:
+  - mgsvec
+  - _self_
+
+train:
+  dataset:
+    length: 49877
+
+validate:
+  dataset:
+    length: 996
+
+evaluate:
+  dataset:
+    length: 9972
