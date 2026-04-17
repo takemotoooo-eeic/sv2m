@@ -1,0 +1,8 @@
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 3.0e-4
+
+scheduler:
+  _target_: sv2m.utils.scheduler.WarmupCosineSchedule
+  warmup_rate: 0.02
+  t_total: 10000

@@ -1,5 +1,5 @@
-from .trainer import MaDeTrainer
+from .trainer import MaDETrainer
 
 __all__ = [
-    "MaDeTrainer",
+    "MaDETrainer",
 ]

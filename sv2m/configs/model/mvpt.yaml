@@ -1,0 +1,53 @@
+_target_: sv2m.models.MVPt
+
+video_encoder:
+  _target_: sv2m.models.mvpt.ModalTowerWrapper
+  backbone:
+    _target_: sv2m.models.mvpt.CLIPVideoEncoder
+    temporal_embedding:
+      _target_: sv2m.modules.mvpt.PositionalEmbedding
+      embedding_dim: 768  # depends on CLIPVisionModel
+      num_frames: 20
+      insert_cls_token: true
+      insert_dist_token: false
+    temporal_backbone:
+      _target_: torch.nn.TransformerEncoder
+      encoder_layer:
+        _target_: torch.nn.TransformerEncoderLayer
+        d_model: 768
+        nhead: 12
+        dim_feedforward: 3072
+        activation:
+          _target_: torch.nn.GELU
+        batch_first: true
+        norm_first: true
+        layer_norm_eps: 1e-6
+      num_layers: 12
+      norm:
+        _target_: torch.nn.LayerNorm
+        normalized_shape: ${..encoder_layer.d_model}
+        eps: ${..encoder_layer.layer_norm_eps}
+    aggregator:
+      _target_: sv2m.models.ast.modified.HeadTokensAggregator
+      insert_cls_token: ${..temporal_embedding.insert_cls_token}
+      insert_dist_token: ${..temporal_embedding.insert_dist_token}
+    head:
+      _target_: torch.nn.Identity
+    freeze_extractor: true
+  out_channels: 128
+
+music_encoder:
+  _target_: sv2m.models.mvpt.ModalTowerWrapper
+  backbone:
+    _target_: sv2m.models.ast.modified.ModifiedAudioSpectrogramTransformer.from_pretrained
+    pretrained_model_name_or_path: ast-base-stride10
+    aggregator:
+      _target_: sv2m.models.ast.modified.HeadTokensAggregator
+      insert_cls_token: true
+      insert_dist_token: false
+    head:
+      _target_: torch.nn.Identity
+  out_channels: ${..video_encoder.out_channels}
+
+loss_fn:
+  _target_: sv2m.criterion.CrossModalNTXentLoss

@@ -28,7 +28,7 @@ from ..logging import get_logger
 from .base import Driver
 
 
-class MaDeTrainer(Driver):
+class MaDETrainer(Driver):
     """Trainer for MaDE contrastive learning model.
 
     Args:
@@ -51,20 +51,20 @@ class MaDeTrainer(Driver):
         *,
         training_dataloader: DataLoader = None,
         validation_dataloader: Optional[DataLoader] = None,
-        model: MaDe = None,
-        optimizer: torch.optim.Optimizer = None,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        # model: MaDe = None,
+        # optimizer: torch.optim.Optimizer = None,
+        # scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         config: DictConfig = None,
         device: Optional[torch.device] = None,
     ) -> None:
-        unwrapped_model = unwrap(model)
+        # unwrapped_model = unwrap(model)
 
-        assert isinstance(unwrapped_model, MaDe), "Only MaDe is supported as model."
+        # assert isinstance(unwrapped_model, MaDe), "Only MaDe is supported as model."
         self.training_dataloader = training_dataloader
         self.validation_dataloader = validation_dataloader
-        self.model = model
-        self.optimizer = optimizer
-        self.scheduler = scheduler
+        # self.model = model
+        # self.optimizer = optimizer
+        # self.scheduler = scheduler
         self.config = config
 
         self._reset(config, device=device)
@@ -76,8 +76,8 @@ class MaDeTrainer(Driver):
     ) -> None:
         training_config = config.train
 
-        if device is None:
-            device = next(self.model.parameters()).device
+        # if device is None:
+        #     device = next(self.model.parameters()).device
 
         dtype = convert_dtype(training_config.torch_dtype)
         enable_amp = should_enable_amp(dtype)
@@ -113,11 +113,11 @@ class MaDeTrainer(Driver):
             "training_loss": [],
             "validation_loss": [],
         }
-        for index, _ in enumerate(self.optimizer.param_groups):
-            self.history[f"learning_rate_{index}"] = []
+        # for index, _ in enumerate(self.optimizer.param_groups):
+        #     self.history[f"learning_rate_{index}"] = []
 
-        unwrapped_model = unwrap(self.model)
-        self.logger.info(unwrapped_model)
+        # unwrapped_model = unwrap(self.model)
+        # self.logger.info(unwrapped_model)
 
         if training_config.checkpoint.resume_from:
             self.load_checkpoint(training_config.checkpoint.resume_from)
@@ -135,7 +135,7 @@ class MaDeTrainer(Driver):
             dict: Training metrics for the epoch.
 
         """
-        self.model.train()
+        # self.model.train()
 
         self.set_epoch_if_possible(dataloader)
 
@@ -145,6 +145,7 @@ class MaDeTrainer(Driver):
         pbar = tqdm(dataloader, desc=f"Epoch {self.epoch + 1}", disable=self.rank != 0)
 
         for batch_index, batch in enumerate(pbar):
+            print(batch)
             video_input = batch["video"]
             music_input = batch["audio"]
 
@@ -359,8 +360,8 @@ class MaDeTrainer(Driver):
             "validation_loss": [],
         }
 
-        for index, _ in enumerate(self.optimizer.param_groups):
-            history[f"learning_rate_{index}"] = []
+        # for index, _ in enumerate(self.optimizer.param_groups):
+        #     history[f"learning_rate_{index}"] = []
 
         for _ in range(self.epoch, epochs):
             training_metrics, validation_metrics = self.run_for_epoch(
@@ -501,40 +502,30 @@ class MaDeTrainer(Driver):
             training_dataset = hydra.utils.instantiate(dataloader_config.train.dataset)
             validation_dataset = hydra.utils.instantiate(dataloader_config.validate.dataset)
 
-            if isinstance(training_dataset, IterableDataset):
-                training_dataloader_kwargs = {
-                    "dataset": training_dataset,
-                }
-            else:
-                training_sampler = DistributedSampler(
-                    training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed
-                )
-                training_dataloader_kwargs = {
-                    "dataset": training_dataset,
-                    "sampler": training_sampler,
-                }
+            training_sampler = DistributedSampler(
+                training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed
+            )
+            training_dataloader_kwargs = {
+                "dataset": training_dataset,
+                "sampler": training_sampler,
+            }
 
-                # shuffle = True is not supported if sampler is given to data loader
-                if "shuffle" in dataloader_config.train and dataloader_config.train.shuffle:
-                    training_dataloader_kwargs["shuffle"] = False
+            # shuffle = True is not supported if sampler is given to data loader
+            if "shuffle" in dataloader_config.train and dataloader_config.train.shuffle:
+                training_dataloader_kwargs["shuffle"] = False
 
-            if isinstance(validation_dataset, IterableDataset):
-                validation_dataloader_kwargs = {
-                    "dataset": validation_dataset,
-                }
-            else:
-                validation_sampler = DistributedSampler(
-                    validation_dataset,
-                    num_replicas=world_size,
-                    rank=rank,
-                    seed=training_config.seed,
-                )
-                validation_dataloader_kwargs = {
-                    "dataset": validation_dataset,
-                    "sampler": validation_sampler,
-                }
-                if "shuffle" in dataloader_config.validate and dataloader_config.validate.shuffle:
-                    validation_dataloader_kwargs["shuffle"] = False
+            validation_sampler = DistributedSampler(
+                validation_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                seed=training_config.seed,
+            )
+            validation_dataloader_kwargs = {
+                "dataset": validation_dataset,
+                "sampler": validation_sampler,
+            }
+            if "shuffle" in dataloader_config.validate and dataloader_config.validate.shuffle:
+                validation_dataloader_kwargs["shuffle"] = False
         else:
             rank = 0
             world_size = 1
@@ -549,24 +540,20 @@ class MaDeTrainer(Driver):
             dataloader_config.validate, **validation_dataloader_kwargs
         )
 
-        model = hydra.utils.instantiate(model_config)
-        model = set_device(
-            model,
-            accelerator=accelerator,
-            is_distributed=is_distributed_mode(),
-            ddp_kwargs=training_config.ddp_kwargs,
-        )
+        # model = hydra.utils.instantiate(model_config)
+        # model = set_device(
+        #     model,
+        #     accelerator=accelerator,
+        #     is_distributed=is_distributed_mode(),
+        #     ddp_kwargs=training_config.ddp_kwargs,
+        # )
 
-        optimizer = hydra.utils.instantiate(optimizer_config, model.parameters())
-        scheduler = hydra.utils.instantiate(scheduler_config, optimizer)
-        device = next(model.parameters()).device
+        # optimizer = hydra.utils.instantiate(optimizer_config, model.parameters())
+        # scheduler = hydra.utils.instantiate(scheduler_config, optimizer)
+        # device = next(model.parameters()).device
 
         return cls(
             training_dataloader=training_dataloader,
             validation_dataloader=validation_dataloader,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
             config=config,
-            device=device,
         )

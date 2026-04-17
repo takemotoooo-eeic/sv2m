@@ -11,6 +11,7 @@ dependencies = [
     "matplotlib",
     "omegaconf",
     "packaging",
+    "pandas>=2.3.3",
     "pyhive",
     "sentence-transformers<5.4",
     "tensorboard",

@@ -1,0 +1,17 @@
+defaults:
+  - default
+  - _self_
+
+trainer:
+  _target_: sv2m.utils.driver.MaDETrainer.build_from_config
+
+ddp_kwargs:
+  find_unused_parameters: false
+
+output:
+  model:
+    epoch:
+      every: 50
+
+steps:
+  epochs: 200

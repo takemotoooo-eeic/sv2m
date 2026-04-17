@@ -2,6 +2,7 @@
 exp/
 tensorboard/
 logs/
+features/
 
 # For uv
 .python-version
