@@ -44,16 +44,19 @@ class AverageAggregator(Aggregator):
         self,
         insert_cls_token: bool = True,
         insert_dist_token: bool = True,
+        use_span_mask: bool = False,
     ) -> None:
         super().__init__()
 
         self.insert_cls_token = insert_cls_token
         self.insert_dist_token = insert_dist_token
+        self.use_span_mask = use_span_mask
 
     def forward(
         self,
         input: torch.Tensor,
-        mask: Optional[torch.BoolTensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        span_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass of AverageAggregator.
 
@@ -86,6 +89,9 @@ class AverageAggregator(Aggregator):
         else:
             _, mask = torch.split(mask, [num_head_tokens, mask.size(-1) - num_head_tokens], dim=-1)
             mask = mask.to(torch.bool)
+
+        if self.use_span_mask and span_mask is not None:
+            mask = (mask.to(torch.long) * span_mask.to(torch.long)).to(torch.bool)
 
         x = x.masked_fill(~mask.unsqueeze(dim=-1), 0)
         valid_count = mask.to(torch.long).sum(dim=-1, keepdim=True).clamp_min(1)
@@ -210,12 +216,14 @@ class XPoolAggregator(nn.Module):
         dropout: float = 0.3,
         insert_cls_token: bool = True,
         insert_dist_token: bool = True,
+        use_span_mask: bool = False,
     ):
         super(XPoolAggregator, self).__init__()
 
         self.cross_attn = CrossAttention(dim_input, num_heads)
         self.insert_cls_token = insert_cls_token
         self.insert_dist_token = insert_dist_token
+        self.use_span_mask = use_span_mask
 
         self.linear_proj = nn.Linear(dim_input, dim_input)
 
@@ -238,6 +246,7 @@ class XPoolAggregator(nn.Module):
         video_embeds: torch.Tensor,
         music_features: torch.Tensor,
         music_masks: Optional[torch.Tensor] = None,
+        span_mask: Optional[torch.Tensor] = None,
     ):
         """
         Input
@@ -260,7 +269,11 @@ class XPoolAggregator(nn.Module):
         music_features = self.layer_norm1(music_features)  # [music_batch_size, seq_len, embed_dim]
 
         # video_batch_size x music_batch_size x embed_dim
-        attn_out = self.cross_attn(video_embeds, music_features, music_masks)
+        if self.use_span_mask and span_mask is not None:
+            mask = span_mask
+        else:
+            mask = music_masks
+        attn_out = self.cross_attn(video_embeds, music_features, mask)
         attn_out = self.layer_norm2(attn_out)
 
         linear_out = self.linear_proj(attn_out)

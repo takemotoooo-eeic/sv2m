@@ -151,13 +151,16 @@ class BaseMGSVECDataset(Dataset):
         music_mask = torch.load(music_mask_path, map_location="cpu", weights_only=True)
         music_feats = music_feats.masked_fill(music_mask.unsqueeze(-1) == 0, 0)  # [bs, max_snippet_num, 768]
 
+        
+        music_feats_cropped, music_mask_cropped = self._crop_feats_by_span(
+            music_feats,
+            music_mask,
+            music_start_time,
+            music_end_time,
+        )
         if self.crop_music_feat:
-            music_feats, music_mask = self._crop_feats_by_span(
-                music_feats,
-                music_mask,
-                music_start_time,
-                music_end_time,
-            )
+            music_feats = music_feats_cropped
+            music_mask = music_mask_cropped
 
         output = {
             "video_id": str(video_id),
@@ -170,6 +173,7 @@ class BaseMGSVECDataset(Dataset):
             "video_masks": video_masks,
             "music_feats": music_feats,
             "music_masks": music_mask,
+            "music_span_masks": music_mask_cropped,
         }
         return output
 

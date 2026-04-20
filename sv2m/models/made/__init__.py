@@ -63,6 +63,7 @@ class MaDE(nn.Module):
         music_feats: torch.Tensor,
         video_masks: Optional[torch.Tensor] = None,
         music_masks: Optional[torch.Tensor] = None,
+        music_span_masks: Optional[torch.Tensor] = None,
         music_ids: Optional[list[str]] = None,
         apply_normalization: Optional[Union[bool, Callable]] = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -73,7 +74,7 @@ class MaDE(nn.Module):
             music_feats (torch.Tensor): Music input tensor.
             video_masks (Optional[torch.Tensor]): Video mask tensor.
             music_masks (Optional[torch.Tensor]): Music mask tensor.
-            video_ids (Optional[list[str]]): Video ids.
+            music_span_masks (Optional[torch.Tensor]): Music span mask tensor.
             music_ids (Optional[list[str]]): Music ids.
             apply_normalization (Optional[Union[bool, Callable]]): Normalization to apply to embeddings.
                 If None, applies L2 normalization by default.
@@ -112,6 +113,7 @@ class MaDE(nn.Module):
             video_masks=video_masks,
             music_features=music_embeddings,
             music_masks=music_masks,
+            music_span_masks=music_span_masks,
             music_ids=music_ids,
         )
 

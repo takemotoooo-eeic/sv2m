@@ -84,6 +84,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
         self,
         music_features: torch.Tensor,
         music_masks: torch.Tensor,
+        music_span_masks: Optional[torch.Tensor],
         video_features: torch.Tensor,
         video_masks: torch.Tensor,
         music_ids: Optional[list[str]],
@@ -132,6 +133,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_music_masks = SyncFunction.apply(music_masks, True)
             global_video_features = SyncFunction.apply(video_features, True)
             global_video_masks = SyncFunction.apply(video_masks, True)
+            global_music_span_masks = SyncFunction.apply(music_span_masks, True)
             
             gathered_music_ids: list[Optional[list[str]]] = [None for _ in range(dist.get_world_size())]
             dist.all_gather_object(gathered_music_ids, list(music_ids))
@@ -142,10 +144,12 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_video_features = video_features
             global_video_masks = video_masks
             global_music_ids = music_ids
+            global_music_span_masks = music_span_masks
 
         return (
             global_music_features,
             global_music_masks,
+            global_music_span_masks,
             global_video_features,
             global_video_masks,
             global_music_ids,
@@ -294,6 +298,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         self,
         music_features: torch.Tensor,
         music_masks: torch.Tensor,
+        music_span_masks: Optional[torch.Tensor],
         music_ids: Optional[list[str]],
         video_features: torch.Tensor,
         video_masks: torch.Tensor,
@@ -318,13 +323,14 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         (
             global_music_features,
             global_music_masks,
+            global_music_span_masks,
             global_video_features,
             global_video_masks,
             global_music_ids,
             local_batch_size,
             is_distributed,
             device,
-        ) = self._validate_and_gather_inputs(music_features, music_masks, video_features, video_masks, music_ids)
+        ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids)
         similarity_matrix_sum = None
 
         for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
@@ -334,9 +340,9 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             video_embeddings = F.normalize(video_embeddings, p=2, dim=-1)
 
             if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings = music_aggregator(video_embeddings, global_music_features, global_music_masks)  # [video_batch_size, music_batch_size, embed_dim]
+                music_embeddings = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
             else:
-                music_embeddings = music_aggregator(global_music_features, global_music_masks)  # [batch_size, embed_dim]
+                music_embeddings = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
             music_embeddings = F.normalize(music_embeddings, p=2, dim=-1)
 
             if isinstance(music_aggregator, XPoolAggregator):
