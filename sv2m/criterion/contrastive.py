@@ -132,7 +132,10 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_music_masks = SyncFunction.apply(music_masks, True)
             global_video_features = SyncFunction.apply(video_features, True)
             global_video_masks = SyncFunction.apply(video_masks, True)
-            global_music_ids = SyncFunction.apply(music_ids, True)
+            
+            gathered_music_ids: list[Optional[list[str]]] = [None for _ in range(dist.get_world_size())]
+            dist.all_gather_object(gathered_music_ids, list(music_ids))
+            global_music_ids = [music_id for ids in gathered_music_ids if ids is not None for music_id in ids]
         else:
             global_music_features = music_features
             global_music_masks = music_masks

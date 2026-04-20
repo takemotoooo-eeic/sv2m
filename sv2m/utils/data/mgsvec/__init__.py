@@ -141,14 +141,14 @@ class BaseMGSVECDataset(Dataset):
         # extract features
         video_feature_path = os.path.join(self.video_feat_dir, "vit_feature", f"{video_id}.pt")
         video_mask_path = os.path.join(self.video_feat_dir, "vit_mask", f"{video_id}.pt")
-        video_feats = torch.load(video_feature_path, map_location="cpu")
-        video_masks = torch.load(video_mask_path, map_location="cpu")
+        video_feats = torch.load(video_feature_path, map_location="cpu", weights_only=True)
+        video_masks = torch.load(video_mask_path, map_location="cpu", weights_only=True)
         video_feats = video_feats.masked_fill(video_masks.unsqueeze(-1) == 0, 0)  # [bs, max_frame_num, 512]
 
         music_feature_path = os.path.join(self.music_feat_dir, "ast_feature", f"{music_id}.pt")
         music_mask_path = os.path.join(self.music_feat_dir, "ast_mask", f"{music_id}.pt")
-        music_feats = torch.load(music_feature_path, map_location="cpu")
-        music_mask = torch.load(music_mask_path, map_location="cpu")
+        music_feats = torch.load(music_feature_path, map_location="cpu", weights_only=True)
+        music_mask = torch.load(music_mask_path, map_location="cpu", weights_only=True)
         music_feats = music_feats.masked_fill(music_mask.unsqueeze(-1) == 0, 0)  # [bs, max_snippet_num, 768]
 
         if self.crop_music_feat:
