@@ -66,4 +66,4 @@ loss_fn:
       dropout: 0.3
   temperature: 0.09
   min_temperature: 0.07
-  delete_duplicate: true
+  delete_duplicate: false

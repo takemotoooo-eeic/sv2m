@@ -25,6 +25,7 @@ class MGSVECLoader:
         num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = False,
+        sampler: Any = None,
         **kwargs,
     ) -> None:
         """Initialize DataLoader with internal distributed sampler.
@@ -41,9 +42,17 @@ class MGSVECLoader:
         if shuffle is None:
             shuffle = True
 
+        if sampler is None and "sampler" in kwargs:
+            sampler = kwargs.pop("sampler")
+        elif "sampler" in kwargs:
+            kwargs.pop("sampler")
+
         self._dataset = dataset
 
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if sampler is not None:
+            self.sampler = sampler
+            dataloader_shuffle = False
+        elif torch.distributed.is_available() and torch.distributed.is_initialized():
             self.sampler = DistributedSampler(
                 dataset,
                 num_replicas=torch.distributed.get_world_size(),
