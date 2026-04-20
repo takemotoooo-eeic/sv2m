@@ -59,20 +59,20 @@ class MaDE(nn.Module):
 
     def forward(
         self,
-        video_input: torch.Tensor,
-        music_input: torch.Tensor,
-        video_mask: Optional[torch.Tensor] = None,
-        music_mask: Optional[torch.Tensor] = None,
+        video_feats: torch.Tensor,
+        music_feats: torch.Tensor,
+        video_masks: Optional[torch.Tensor] = None,
+        music_masks: Optional[torch.Tensor] = None,
         music_ids: Optional[list[str]] = None,
         apply_normalization: Optional[Union[bool, Callable]] = True,
-    ) -> Union[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass of MVPt.
 
         Args:
-            video_input (torch.Tensor): Video input tensor.
-            music_input (torch.Tensor): Music input tensor.
-            video_mask (Optional[torch.Tensor]): Video mask tensor.
-            music_mask (Optional[torch.Tensor]): Music mask tensor.
+            video_feats (torch.Tensor): Video input tensor.
+            music_feats (torch.Tensor): Music input tensor.
+            video_masks (Optional[torch.Tensor]): Video mask tensor.
+            music_masks (Optional[torch.Tensor]): Music mask tensor.
             video_ids (Optional[list[str]]): Video ids.
             music_ids (Optional[list[str]]): Music ids.
             apply_normalization (Optional[Union[bool, Callable]]): Normalization to apply to embeddings.
@@ -86,8 +86,8 @@ class MaDE(nn.Module):
                 If loss_fn is None: Returns tuple of (video_embeddings, music_embeddings)
                 If loss_fn is provided: Returns tuple of (video_embeddings, music_embeddings, loss)
         """  # noqa: E501
-        video_embeddings, video_mask = self.video_encoder(video_input, video_mask)
-        music_embeddings, music_mask = self.music_encoder(music_input, music_mask)
+        video_embeddings, video_masks = self.video_encoder(video_feats, video_masks)
+        music_embeddings, music_masks = self.music_encoder(music_feats, music_masks)
 
         if apply_normalization is None:
             pass
@@ -105,14 +105,14 @@ class MaDE(nn.Module):
             raise ValueError(f"Invalid apply_normalization type: {type(apply_normalization)}")
 
         if self.loss_fn is None:
-            return video_embeddings, video_mask, music_embeddings, music_mask
+            return video_embeddings, video_masks, music_embeddings, music_masks
 
         loss = self.loss_fn(
             video_features=video_embeddings,
-            video_masks=video_mask,
+            video_masks=video_masks,
             music_features=music_embeddings,
-            music_masks=music_mask,
+            music_masks=music_masks,
             music_ids=music_ids,
         )
 
-        return video_embeddings, video_mask, music_embeddings, music_mask, loss
+        return video_embeddings, video_masks, music_embeddings, music_masks, loss

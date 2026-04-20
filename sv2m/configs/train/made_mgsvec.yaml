@@ -11,7 +11,7 @@ ddp_kwargs:
 output:
   model:
     epoch:
-      every: 50
+      every: 1
 
 steps:
-  epochs: 200
+  epochs: 100

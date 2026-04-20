@@ -343,13 +343,13 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
                 similarity_matrix = torch.einsum("vmd,vd->mv", global_music_embeddings, global_video_embeddings)  # [batch_size, batch_size]
             else:
                 similarity_matrix = torch.matmul(global_music_embeddings, global_video_embeddings.T)  # [batch_size, batch_size]
-
+            
             if similarity_matrix_sum is None:
                 similarity_matrix_sum = similarity_matrix
             else:
                 similarity_matrix_sum = similarity_matrix_sum + similarity_matrix
-
         similarity_matrix = similarity_matrix_sum / self.temperature
+        
 
         if is_distributed:
             # In DDP mode, each rank computes loss only on its local batch portion

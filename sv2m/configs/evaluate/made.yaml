@@ -1,0 +1,6 @@
+defaults:
+  - default
+  - _self_
+
+evaluator:
+  _target_: sv2m.utils.driver.MaDEEvaluator.build_from_config

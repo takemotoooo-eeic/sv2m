@@ -3,14 +3,14 @@
 set -eu
 set -o pipefail
 
-tag=""
+tag="test-xpool"
 
 exp_root="exp"
 tensorboard_root="tensorboard"
 
-music_feat_dir="/home/sarulab/kengo_takemoto/sv2m/features/ast_feature2p5"
-video_feat_dir="/home/sarulab/kengo_takemoto/sv2m/features/vit_feature1"
-csv_root="/home/sarulab/kengo_takemoto/sv2m/dataset/MGSV-EC"
+music_feat_dir="/Users/kentakem/sv2m/features/ast_feature2p5"
+video_feat_dir="/Users/kentakem/sv2m/features/vit_feature1"
+csv_root="/Users/kentakem/sv2m/dataset/MGSV-EC"
 
 dataloader="mgsvec"
 train="made_mgsvec"
