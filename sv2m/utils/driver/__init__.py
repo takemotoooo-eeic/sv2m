@@ -1,5 +1,7 @@
-from .trainer import MaDeTrainer
+from .trainer import MaDETrainer
+from .evaluator import MaDEEvaluator
 
 __all__ = [
-    "MaDeTrainer",
+    "MaDEEvaluator",
+    "MaDETrainer",
 ]

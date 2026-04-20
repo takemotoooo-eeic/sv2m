@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+
 from sv2m.modules.aggregater import Aggregator
 from sv2m.modules.head import Head
 
@@ -56,7 +57,7 @@ class CLIPVideoEncoder(nn.Module):
         Returns:
             Video embedding of shape (batch_size, hidden_size)
         """
-        x = self.temporal_embedding_forward(x)
+        x = self.temporal_embedding_forward(input)
         output = self.temporal_backbone_forward(x)
 
         if self.aggregator is not None:
@@ -76,9 +77,7 @@ class CLIPVideoEncoder(nn.Module):
     def prepend_head_tokens(self, sequence: torch.Tensor) -> torch.Tensor:
         return self.temporal_embedding.prepend_head_tokens(sequence)
 
-    def prepend_tokens(
-        self, sequence: torch.Tensor, tokens: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def prepend_tokens(self, sequence: torch.Tensor, tokens: Optional[torch.Tensor] = None) -> torch.Tensor:
         return self.temporal_embedding.prepend_tokens(sequence, tokens=tokens)
 
     def split_sequence(self, sequence: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

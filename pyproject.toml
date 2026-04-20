@@ -6,15 +6,17 @@ requires-python = ">=3.10, <4"
 dependencies = [
     "boto3<1.36",
     "botocore",
+    "einops>=0.8.2",
     "hydra-core",
     "lxml",
     "matplotlib",
     "omegaconf",
     "packaging",
+    "pandas>=2.3.3",
     "pyhive",
     "sentence-transformers<5.4",
     "tensorboard",
-    "torch>=2.9",
+    "torch>=2.4,<2.6",
     "torchaudio",
     "torchcodec>=0.9",
     "torchvision",
@@ -44,7 +46,7 @@ include = [
 ]
 
 [tool.ruff]
-line-length = 99
+line-length = 160
 
 [tool.ruff.lint]
 select = [

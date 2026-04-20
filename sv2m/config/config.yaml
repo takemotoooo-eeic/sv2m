@@ -1,6 +1,0 @@
-defaults:
-  - dataloader: default
-  - train: default
-  - evaluate: default
-  - model: default
-  - optimizer: default

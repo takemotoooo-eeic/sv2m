@@ -13,8 +13,8 @@ from sentence_transformers import SentenceTransformer
 from transformers import BertModel
 from transformers.tokenization_utils_base import BatchEncoding
 
+from ..mvpt.ast import AudioSpectrogramTransformer
 from ..mvpt.video import CLIPVideoEncoder
-from ..mvpt.ast import ModifiedAudioSpectrogramTransformer
 
 __all__ = [
     "ModalTowerWrapper",
@@ -32,7 +32,7 @@ class ModalTowerWrapper(nn.Module):
     Args:
         backbone (nn.Module): The encoder backbone network. Supported backbones include:
             - CLIPVideoEncoder
-            - ModifiedAudioSpectrogramTransformer
+            - AudioSpectrogramTransformer
             - SentenceTransformer
         out_channels (int): Output embedding dimension for the shared space.
         hidden_channels (int, optional): Dimension of backbone output. If None,
@@ -45,9 +45,9 @@ class ModalTowerWrapper(nn.Module):
             hidden_channels inference.
 
     Examples:
-        >>> from musreel.models.ast import ModifiedAudioSpectrogramTransformer
+        >>> from musreel.models.ast import AudioSpectrogramTransformer
         >>> from musreel.models.mvpt import ModalTowerWrapper
-        >>> audio_backbone = ModifiedAudioSpectrogramTransformer.from_pretrained(
+        >>> audio_backbone = AudioSpectrogramTransformer.from_pretrained(
         ...     "ast-base-stride10"
         ... )
         >>> audio_encoder = ModalTowerWrapper(
@@ -71,19 +71,17 @@ class ModalTowerWrapper(nn.Module):
             if isinstance(
                 backbone,
                 (
-                    ModifiedAudioSpectrogramTransformer,
+                    AudioSpectrogramTransformer,
                     CLIPVideoEncoder,
                 ),
             ):
-                backbone: ModifiedAudioSpectrogramTransformer
+                backbone: AudioSpectrogramTransformer
                 hidden_channels = backbone.embedding_dim
             elif isinstance(backbone, SentenceTransformer):
                 backbone: SentenceTransformer
                 hidden_channels = backbone[-1].word_embedding_dimension
             else:
-                raise NotImplementedError(
-                    f"{type(backbone)} is not supported as backbone network."
-                )
+                raise NotImplementedError(f"{type(backbone)} is not supported as backbone network.")
 
         self.linear = nn.Linear(hidden_channels, out_channels)
 
@@ -112,15 +110,13 @@ class ModalTowerWrapper(nn.Module):
         embedding = backbone(*args, **kwargs)
 
         if isinstance(backbone, SentenceTransformer):
-            assert isinstance(embedding, BatchEncoding), (
-                f"Invalid type {type(embedding)} is detected."
-            )
+            assert isinstance(embedding, BatchEncoding), f"Invalid type {type(embedding)} is detected."
 
             embedding = embedding["sentence_embedding"]
         elif isinstance(
             backbone,
             (
-                ModifiedAudioSpectrogramTransformer,
+                AudioSpectrogramTransformer,
                 CLIPVideoEncoder,
             ),
         ):
@@ -136,12 +132,8 @@ class ModalTowerWrapper(nn.Module):
         if isinstance(self.backbone, BertModel):
             # for backward compatibility of BertModel in transformers
             self_state_dict = self.state_dict()
-            is_state_dict_pos_ids_available = (
-                "backbone.embeddings.position_ids" in state_dict.keys()
-            )
-            is_model_pos_ids_available = (
-                "backbone.embeddings.position_ids" in self_state_dict.keys()
-            )
+            is_state_dict_pos_ids_available = "backbone.embeddings.position_ids" in state_dict.keys()
+            is_model_pos_ids_available = "backbone.embeddings.position_ids" in self_state_dict.keys()
 
             if is_state_dict_pos_ids_available and not is_model_pos_ids_available:
                 # remove "backbone.embeddings.position_ids" from given state_dict
@@ -150,8 +142,6 @@ class ModalTowerWrapper(nn.Module):
                 assert torch.allclose(position_ids, self_position_ids)
             elif not is_state_dict_pos_ids_available and is_model_pos_ids_available:
                 # define "backbone.embeddings.position_ids" in state_dict
-                state_dict["backbone.embeddings.position_ids"] = self_state_dict[
-                    "backbone.embeddings.position_ids"
-                ]
+                state_dict["backbone.embeddings.position_ids"] = self_state_dict["backbone.embeddings.position_ids"]
 
         return super().load_state_dict(state_dict=state_dict, **kwargs)

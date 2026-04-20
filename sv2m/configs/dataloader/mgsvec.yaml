@@ -1,0 +1,54 @@
+defaults:
+  - default
+  - _self_
+
+train:
+  _target_: sv2m.utils.data.MGSVECLoader
+  dataset:
+    _target_: sv2m.utils.data.mgsvec.TrainingMGSVECDataset
+    video_feat_dir:
+    music_feat_dir:
+    csv_root:
+    music_max_duration: 240
+    max_video_frames: 50
+    stride: 2.5
+    subset: train
+    length: 49194
+    crop_music_feat: false
+  batch_size: 512
+  shuffle: true
+  drop_last: true
+
+validate:
+  _target_: ${..train._target_}
+  dataset:
+    _target_: ${...train.dataset._target_}
+    video_feat_dir: ${...train.dataset.video_feat_dir}
+    music_feat_dir: ${...train.dataset.music_feat_dir}
+    csv_root: ${...train.dataset.csv_root}
+    music_max_duration: ${...train.dataset.music_max_duration}
+    max_video_frames: ${...train.dataset.max_video_frames}
+    stride: ${...train.dataset.stride}
+    subset: val
+    crop_music_feat: ${...train.dataset.crop_music_feat}
+    length: 2000
+  batch_size: 64
+  shuffle: false
+  drop_last: true
+
+evaluate:
+  _target_: ${..train._target_}
+  dataset:
+    _target_: sv2m.utils.data.mgsvec.InferenceMGSVECDataset
+    video_feat_dir: ${...train.dataset.video_feat_dir}
+    music_feat_dir: ${...train.dataset.music_feat_dir}
+    csv_root: ${...train.dataset.csv_root}
+    music_max_duration: ${...train.dataset.music_max_duration}
+    max_video_frames: ${...train.dataset.max_video_frames}
+    stride: ${...train.dataset.stride}
+    subset: test
+    crop_music_feat: ${...train.dataset.crop_music_feat}
+    length: 2000
+  batch_size: 64
+  shuffle: false
+  drop_last: false

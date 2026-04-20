@@ -3,25 +3,22 @@
 set -eu
 set -o pipefail
 
-tag=""
-
-video_dir="/path/to/video_dir"
+tag="test-xpool"
 
 exp_root="exp"
 tensorboard_root="tensorboard"
 
-dataloader="himv61k"
-pipeline="mvpt"
-train="mvpt_himv61k"
-model="modified_mvpt_finetuning"
-optimizer="musreel_pretraining"
+music_feat_dir="/Users/kentakem/sv2m/features/ast_feature2p5"
+video_feat_dir="/Users/kentakem/sv2m/features/vit_feature1"
+csv_root="/Users/kentakem/sv2m/dataset/MGSV-EC"
+
+dataloader="mgsvec"
+train="made_mgsvec"
+model="made"
+optimizer="made"
 
 . ../_common/parse_options.sh || exit 1;
 
-if [ -z "${video_dir}" ]; then
-    echo "video_dir is not set."
-    exit 1;
-fi
 
 if [ -z "${tag}" ]; then
     tag="$(date +"%Y%m%d-%H%M%S")"
@@ -35,10 +32,11 @@ tensorboard_dir="${tensorboard_root}/${tag}"
 ${cmd} local/train.py \
 hydra.run.dir="${exp_dir}/logs/$(date +"%Y%m%d-%H%M%S")" \
 dataloader="${dataloader}" \
-pipeline="${pipeline}" \
-train="${train}" \
 model="${model}" \
+dataloader.train.dataset.video_feat_dir="${video_feat_dir}" \
+dataloader.train.dataset.music_feat_dir="${music_feat_dir}" \
+dataloader.train.dataset.csv_root="${csv_root}" \
+train="${train}" \
 optimizer="${optimizer}" \
-dataloader.train.dataset.video_dir="${video_dir}" \
 train.output.exp_dir="${exp_dir}" \
 train.output.tensorboard_dir="${tensorboard_dir}"

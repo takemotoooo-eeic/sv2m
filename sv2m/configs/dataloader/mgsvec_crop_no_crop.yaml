@@ -1,0 +1,15 @@
+defaults:
+  - mgsvec
+  - _self_
+
+train:
+  dataset:
+    crop_music_feat: true
+
+validate:
+  dataset:
+    crop_music_feat: true
+
+evaluate:
+  dataset:
+    crop_music_feat: false

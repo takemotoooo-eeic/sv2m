@@ -78,10 +78,7 @@ def init_distributed_training_if_necessary() -> None:
             if world_size > torch.cuda.device_count():
                 # Multi-node case
                 if "MASTER_ADDR" not in os.environ or "MASTER_PORT" not in os.environ:
-                    raise RuntimeError(
-                        "Multi-node training requires MASTER_ADDR and MASTER_PORT "
-                        "environment variables to be set."
-                    )
+                    raise RuntimeError("Multi-node training requires MASTER_ADDR and MASTER_PORT environment variables to be set.")
 
             dist.init_process_group(
                 backend=backend,

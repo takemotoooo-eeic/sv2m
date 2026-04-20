@@ -9,11 +9,17 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 import hydra
+import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
+
+from sv2m.models.made import MaDE
+from sv2m.criterion import retrieval_metrics
+from sv2m.modules.aggregater import XPoolAggregator 
 
 from ...amp import should_enable_amp
 from ...distributed import (
@@ -28,7 +34,7 @@ from ..logging import get_logger
 from .base import Driver
 
 
-class MaDeTrainer(Driver):
+class MaDETrainer(Driver):
     """Trainer for MaDE contrastive learning model.
 
     Args:
@@ -51,7 +57,7 @@ class MaDeTrainer(Driver):
         *,
         training_dataloader: DataLoader = None,
         validation_dataloader: Optional[DataLoader] = None,
-        model: MaDe = None,
+        model: MaDE = None,
         optimizer: torch.optim.Optimizer = None,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         config: DictConfig = None,
@@ -59,7 +65,7 @@ class MaDeTrainer(Driver):
     ) -> None:
         unwrapped_model = unwrap(model)
 
-        assert isinstance(unwrapped_model, MaDe), "Only MaDe is supported as model."
+        assert isinstance(unwrapped_model, MaDE), "Only MaDE is supported as model."
         self.training_dataloader = training_dataloader
         self.validation_dataloader = validation_dataloader
         self.model = model
@@ -144,18 +150,25 @@ class MaDeTrainer(Driver):
 
         pbar = tqdm(dataloader, desc=f"Epoch {self.epoch + 1}", disable=self.rank != 0)
 
-        for batch_index, batch in enumerate(pbar):
-            video_input = batch["video"]
-            music_input = batch["audio"]
+        for _, batch in enumerate(pbar):
+            video_feats = batch["video_feats"]
+            music_feats = batch["music_feats"]
+            video_masks = batch["video_masks"]
+            music_masks = batch["music_masks"]
+            music_ids = batch["music_id"]
 
-            video_input = video_input.to(self.device)
-            music_input = music_input.to(self.device)
-
+            video_feats = video_feats.to(self.device)
+            music_feats = music_feats.to(self.device)
+            video_masks = video_masks.to(self.device)
+            music_masks = music_masks.to(self.device)
             self.optimizer.zero_grad()
 
-            video_embeddings, music_embeddings, loss = self.model(
-                video_input=video_input,
-                music_input=music_input,
+            _, _, _, _, loss = self.model(
+                video_feats=video_feats,
+                video_masks=video_masks,
+                music_feats=music_feats,
+                music_masks=music_masks,
+                music_ids=music_ids,
                 apply_normalization=True,
             )
             loss.backward()
@@ -166,8 +179,13 @@ class MaDeTrainer(Driver):
             average_loss = total_training_loss / num_training_batches
 
             self.iteration += 1
+            self.writer.add_scalar("training_loss/iteration", loss.item(), global_step=self.iteration)
+
+            loss_fn = unwrap(self.model).loss_fn
             self.writer.add_scalar(
-                "training_loss/iteration", loss.item(), global_step=self.iteration
+                "temperature/iteration",
+                float(loss_fn.temperature.detach().item()),
+                global_step=self.iteration,
             )
 
             for index, param_group in enumerate(self.optimizer.param_groups):
@@ -192,6 +210,9 @@ class MaDeTrainer(Driver):
             "training_loss": average_loss,
         }
 
+        loss_fn = unwrap(self.model).loss_fn
+        metrics["temperature"] = float(loss_fn.temperature.detach().item())
+
         for index, param_group in enumerate(self.optimizer.param_groups):
             metrics[f"learning_rate_{index}"] = param_group["lr"]
 
@@ -215,19 +236,33 @@ class MaDeTrainer(Driver):
         total_validation_loss = 0
         num_validation_batches = 0
 
+        all_video_features = []
+        all_video_masks = []
+        all_music_features = []
+        all_music_masks = []
+        all_music_ids: list[str] = []
+
         pbar = tqdm(dataloader, desc="Validation", disable=self.rank != 0)
 
         with torch.no_grad():
-            for batch_index, batch in enumerate(pbar):
-                video_input = batch["video"]
-                music_input = batch["audio"]
+            for _, batch in enumerate(pbar):
+                video_feats = batch["video_feats"]
+                music_feats = batch["music_feats"]
+                video_masks = batch["video_masks"]
+                music_masks = batch["music_masks"]
+                music_ids = batch["music_id"]
 
-                video_input = video_input.to(self.device)
-                music_input = music_input.to(self.device)
+                video_feats = video_feats.to(self.device)
+                music_feats = music_feats.to(self.device)
+                video_masks = video_masks.to(self.device)
+                music_masks = music_masks.to(self.device)
 
-                video_embeddings, music_embeddings, loss = self.model(
-                    video_input=video_input,
-                    music_input=music_input,
+                video_embeddings, video_masks, music_embeddings, music_masks, loss = self.model(
+                    video_feats=video_feats,
+                    music_feats=music_feats,
+                    video_masks=video_masks,
+                    music_masks=music_masks,
+                    music_ids=music_ids,
                     apply_normalization=True,
                 )
 
@@ -242,10 +277,104 @@ class MaDeTrainer(Driver):
                     }
                 )
 
+                all_video_features.append(video_embeddings.detach().cpu())
+                all_video_masks.append(video_masks.detach().cpu())
+                all_music_features.append(music_embeddings.detach().cpu())
+                all_music_masks.append(music_masks.detach().cpu())
+
+                if isinstance(music_ids, (list, tuple)):
+                    all_music_ids.extend([str(x) for x in music_ids])
+                elif isinstance(music_ids, torch.Tensor):
+                    all_music_ids.extend([str(x.item()) for x in music_ids])
+                else:
+                    all_music_ids.append(str(music_ids))
+
         average_loss = total_validation_loss / num_validation_batches
+
+        local_video_features = torch.cat(all_video_features, dim=0)
+        local_video_masks = torch.cat(all_video_masks, dim=0)
+        local_music_features = torch.cat(all_music_features, dim=0)
+        local_music_masks = torch.cat(all_music_masks, dim=0)
+
+        if is_distributed_mode():
+            world_size = dist.get_world_size()
+
+            gathered_video_features = [None] * world_size
+            gathered_video_masks = [None] * world_size
+            gathered_music_features = [None] * world_size
+            gathered_music_masks = [None] * world_size
+            gathered_music_ids = [None] * world_size
+
+            dist.all_gather_object(gathered_video_features, local_video_features)
+            dist.all_gather_object(gathered_video_masks, local_video_masks)
+            dist.all_gather_object(gathered_music_features, local_music_features)
+            dist.all_gather_object(gathered_music_masks, local_music_masks)
+            dist.all_gather_object(gathered_music_ids, all_music_ids)
+
+            global_video_features = torch.cat(gathered_video_features, dim=0).to(self.device)
+            global_video_masks = torch.cat(gathered_video_masks, dim=0).to(self.device)
+            global_music_features = torch.cat(gathered_music_features, dim=0).to(self.device)
+            global_music_masks = torch.cat(gathered_music_masks, dim=0).to(self.device)
+            global_music_ids = [music_id for rank_ids in gathered_music_ids for music_id in rank_ids]
+        else:
+            global_video_features = local_video_features.to(self.device)
+            global_video_masks = local_video_masks.to(self.device)
+            global_music_features = local_music_features.to(self.device)
+            global_music_masks = local_music_masks.to(self.device)
+            global_music_ids = all_music_ids
+
+        unwrapped_model = unwrap(self.model)
+        loss_fn = unwrapped_model.loss_fn
+
+        if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
+            similarity_matrix_sum = None
+            for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
+                video_emb = video_aggregator(global_video_features, global_video_masks)
+                video_emb = F.normalize(video_emb, p=2, dim=-1)
+
+                if isinstance(music_aggregator, XPoolAggregator):
+                    music_emb = music_aggregator(video_emb, global_music_features, global_music_masks)
+                    music_emb = F.normalize(music_emb, p=2, dim=-1)
+                    sim = torch.einsum("vmd,vd->vm", music_emb, video_emb)
+                else:
+                    music_emb = music_aggregator(global_music_features, global_music_masks)
+                    music_emb = F.normalize(music_emb, p=2, dim=-1)
+                    sim = torch.matmul(video_emb, music_emb.T)
+                
+
+                if similarity_matrix_sum is None:
+                    similarity_matrix_sum = sim
+                else:
+                    similarity_matrix_sum = similarity_matrix_sum + sim
+
+            sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
+        else:
+            sim_matrix_np = torch.matmul(global_video_features, global_music_features.T).detach().cpu().numpy()
+
+        retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
+
         metrics = {
             "validation_loss": average_loss,
         }
+        metrics.update({f"validation_{key}": float(value) for key, value in retrieval.items() if isinstance(value, (int, float, np.floating))})
+
+        for key, value in retrieval.items():
+            if isinstance(value, (int, float, np.floating)):
+                metrics[f"validation_{key}"] = float(value)
+
+        if self.rank == 0:
+            self.logger.info(
+                "[Validation] "
+                + ", ".join(
+                    [
+                        f"loss={metrics['validation_loss']:.4f}",
+                        f"R1={metrics.get('validation_R1', float('nan')):.2f}",
+                        f"R5={metrics.get('validation_R5', float('nan')):.2f}",
+                        f"R10={metrics.get('validation_R10', float('nan')):.2f}",
+                        f"MRR={metrics.get('validation_MRR', float('nan')):.4f}",
+                    ]
+                )
+            )
 
         return metrics
 
@@ -278,9 +407,7 @@ class MaDeTrainer(Driver):
             validation_metrics = self.validate_for_epoch(validation_dataloader)
 
             for metric_key, metric_value in validation_metrics.items():
-                self.writer.add_scalar(
-                    f"{metric_key}/epoch", metric_value, global_step=self.epoch + 1
-                )
+                self.writer.add_scalar(f"{metric_key}/epoch", metric_value, global_step=self.epoch + 1)
 
             self.epoch += 1
 
@@ -292,10 +419,7 @@ class MaDeTrainer(Driver):
                 path = path.format(epoch=self.epoch)
                 self.save_checkpoint(path)
 
-            self.logger.info(
-                f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}, "
-                f"validation_loss={validation_loss:.4f}"
-            )
+            self.logger.info(f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}, validation_loss={validation_loss:.4f}")
 
             if validation_metrics["validation_loss"] < self.best_validation_loss:
                 self.best_validation_loss = validation_metrics["validation_loss"]
@@ -318,6 +442,9 @@ class MaDeTrainer(Driver):
 
             validation_metrics = {}
 
+        path = checkpoint_config.last_epoch.path
+        path = path.format(epoch=self.epoch)
+        self.save_checkpoint(path)
         return training_metrics, validation_metrics
 
     def run(
@@ -347,9 +474,7 @@ class MaDeTrainer(Driver):
         iterations = training_config.steps.iterations
 
         if (epochs is None) == (iterations is None):
-            raise ValueError(
-                "Set either of config.train.steps.epochs or config.train.steps.iterations."
-            )
+            raise ValueError("Set either of config.train.steps.epochs or config.train.steps.iterations.")
 
         if iterations is not None:
             raise NotImplementedError("iteraions is not supported")
@@ -363,9 +488,7 @@ class MaDeTrainer(Driver):
             history[f"learning_rate_{index}"] = []
 
         for _ in range(self.epoch, epochs):
-            training_metrics, validation_metrics = self.run_for_epoch(
-                training_dataloader, validation_dataloader
-            )
+            training_metrics, validation_metrics = self.run_for_epoch(training_dataloader, validation_dataloader)
 
             for metric_key, metric_value in training_metrics.items():
                 if metric_key in history:
@@ -468,15 +591,11 @@ class MaDeTrainer(Driver):
             dataloader.set_epoch(self.epoch)
         else:
             if hasattr(dataloader, "sampler") and dataloader.sampler is not None:
-                if hasattr(dataloader.sampler, "set_epoch") and callable(
-                    dataloader.sampler.set_epoch
-                ):
+                if hasattr(dataloader.sampler, "set_epoch") and callable(dataloader.sampler.set_epoch):
                     dataloader.sampler.set_epoch(self.epoch)
 
             if hasattr(dataloader, "batch_sampler") and dataloader.batch_sampler is not None:
-                if hasattr(dataloader.batch_sampler, "set_epoch") and callable(
-                    dataloader.batch_sampler.set_epoch
-                ):
+                if hasattr(dataloader.batch_sampler, "set_epoch") and callable(dataloader.batch_sampler.set_epoch):
                     dataloader.batch_sampler.set_epoch(self.epoch)
 
     @classmethod
@@ -501,40 +620,28 @@ class MaDeTrainer(Driver):
             training_dataset = hydra.utils.instantiate(dataloader_config.train.dataset)
             validation_dataset = hydra.utils.instantiate(dataloader_config.validate.dataset)
 
-            if isinstance(training_dataset, IterableDataset):
-                training_dataloader_kwargs = {
-                    "dataset": training_dataset,
-                }
-            else:
-                training_sampler = DistributedSampler(
-                    training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed
-                )
-                training_dataloader_kwargs = {
-                    "dataset": training_dataset,
-                    "sampler": training_sampler,
-                }
+            training_sampler = DistributedSampler(training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed)
+            training_dataloader_kwargs = {
+                "dataset": training_dataset,
+                "sampler": training_sampler,
+            }
 
-                # shuffle = True is not supported if sampler is given to data loader
-                if "shuffle" in dataloader_config.train and dataloader_config.train.shuffle:
-                    training_dataloader_kwargs["shuffle"] = False
+            # shuffle = True is not supported if sampler is given to data loader
+            if "shuffle" in dataloader_config.train and dataloader_config.train.shuffle:
+                training_dataloader_kwargs["shuffle"] = False
 
-            if isinstance(validation_dataset, IterableDataset):
-                validation_dataloader_kwargs = {
-                    "dataset": validation_dataset,
-                }
-            else:
-                validation_sampler = DistributedSampler(
-                    validation_dataset,
-                    num_replicas=world_size,
-                    rank=rank,
-                    seed=training_config.seed,
-                )
-                validation_dataloader_kwargs = {
-                    "dataset": validation_dataset,
-                    "sampler": validation_sampler,
-                }
-                if "shuffle" in dataloader_config.validate and dataloader_config.validate.shuffle:
-                    validation_dataloader_kwargs["shuffle"] = False
+            validation_sampler = DistributedSampler(
+                validation_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                seed=training_config.seed,
+            )
+            validation_dataloader_kwargs = {
+                "dataset": validation_dataset,
+                "sampler": validation_sampler,
+            }
+            if "shuffle" in dataloader_config.validate and dataloader_config.validate.shuffle:
+                validation_dataloader_kwargs["shuffle"] = False
         else:
             rank = 0
             world_size = 1
@@ -542,12 +649,8 @@ class MaDeTrainer(Driver):
             training_dataloader_kwargs = {}
             validation_dataloader_kwargs = {}
 
-        training_dataloader = hydra.utils.instantiate(
-            dataloader_config.train, **training_dataloader_kwargs
-        )
-        validation_dataloader = hydra.utils.instantiate(
-            dataloader_config.validate, **validation_dataloader_kwargs
-        )
+        training_dataloader = hydra.utils.instantiate(dataloader_config.train, **training_dataloader_kwargs)
+        validation_dataloader = hydra.utils.instantiate(dataloader_config.validate, **validation_dataloader_kwargs)
 
         model = hydra.utils.instantiate(model_config)
         model = set_device(

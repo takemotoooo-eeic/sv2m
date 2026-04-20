@@ -1,8 +1,0 @@
-train:
-  _target_:
-
-validate:
-  _target_:
-
-evaluate:
-  _target_:
