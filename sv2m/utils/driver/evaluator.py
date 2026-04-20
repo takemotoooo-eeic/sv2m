@@ -215,11 +215,11 @@ class MaDEEvaluator(Driver):
                 if isinstance(music_aggregator, XPoolAggregator):
                     music_emb = music_aggregator(video_emb, global_music_features, global_music_masks)
                     music_emb = F.normalize(music_emb, p=2, dim=-1)
-                    sim = torch.einsum("vmd,vd->mv", music_emb, video_emb)
+                    sim = torch.einsum("vmd,vd->vm", music_emb, video_emb)
                 else:
                     music_emb = music_aggregator(global_music_features, global_music_masks)
                     music_emb = F.normalize(music_emb, p=2, dim=-1) 
-                    sim = torch.matmul(music_emb, video_emb.T)
+                    sim = torch.matmul(video_emb, music_emb.T)
 
                 if similarity_matrix_sum is None:
                     similarity_matrix_sum = sim
@@ -228,7 +228,7 @@ class MaDEEvaluator(Driver):
 
             sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
         else:
-            sim_matrix_np = torch.matmul(global_music_features, global_video_features.T).detach().cpu().numpy()
+            sim_matrix_np = torch.matmul(global_video_features, global_music_features.T).detach().cpu().numpy()
 
         retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
 

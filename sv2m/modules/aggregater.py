@@ -174,31 +174,31 @@ class CrossAttention(nn.Module):
             music_features: (batch_size, seq_len, embed_dim)
             music_mask: (batch_size, seq_len)
         Output
-            o: (batch_size, batch_size, embed_dim)
+            o: (video_batch_size, music_batch_size, embed_dim)
         """
-        # batch_size x embed_dim
+        # video_batch_size x embed_dim
         q = self.q_proj(video_embeds)
-        q = rearrange(q, "b (h d) -> h b d", h=self.num_heads, d=self.head_dim)  # （num_heads, batch_size, head_dim）
+        q = rearrange(q, "v (h d) -> h v d", h=self.num_heads, d=self.head_dim)  # (num_heads, video_batch_size, head_dim)
 
-        k = self.k_proj(music_features)  # (batch_size, seq_len, embed_dim)
-        k = rearrange(k, "b f (h d) -> b h f d", h=self.num_heads, d=self.head_dim)  # (batch_size, num_heads, seq_len, head_dim)
+        k = self.k_proj(music_features)  # (music_batch_size, seq_len, embed_dim)
+        k = rearrange(k, "m f (h d) -> m h f d", h=self.num_heads, d=self.head_dim)  # (music_batch_size, num_heads, seq_len, head_dim)
 
-        v = self.v_proj(music_features)  # (batch_size, seq_len, embed_dim)
-        v = rearrange(v, "b f (h d) -> b h f d", h=self.num_heads, d=self.head_dim)  # (batch_size, num_heads, seq_len, head_dim)
+        v = self.v_proj(music_features)  # (music_batch_size, seq_len, embed_dim)
+        v = rearrange(v, "m f (h d) -> m h f d", h=self.num_heads, d=self.head_dim)  # (music_batch_size, num_heads, seq_len, head_dim)
 
         # The dot product attention gives relevancy weights from a video to each segment.
-        attention_logits = torch.matmul(q.unsqueeze(0), k.transpose(-1, -2))  # (batch_size, num_heads, batch_size, seq_len)
+        attention_logits = torch.einsum("hvd,mhfd->vmhf", q, k)  # (video_batch_size, music_batch_size, num_heads, seq_len)
         attention_logits = attention_logits / math.sqrt(self.head_dim)
 
         # mask the attention_logits
         if music_mask is not None:
-            music_mask = music_mask[:, None, None, :]  # (batch_size, 1, 1, seq_len)
+            music_mask = music_mask[None, :, None, :]  # (1, music_batch_size, 1, seq_len)
             attention_logits = attention_logits.masked_fill(music_mask == 0, float("-inf"))
-        attention_weights = F.softmax(attention_logits, dim=-1)  # (batch_size, num_heads, batch_size, seq_len)
+        attention_weights = F.softmax(attention_logits, dim=-1)  # (video_batch_size, music_batch_size, num_heads, seq_len)
 
-        attention = torch.matmul(attention_weights, v)  # (batch_size, num_heads, batch_size, head_dim)
-        attention = rearrange(attention, "m h n d -> m n (h d)")  # (batch_size, batch_size, num_heads*head_dim)
-        o = self.out_proj(attention)  # (batch_size, batch_size, embed_dim)
+        attention = torch.einsum("vmhf,mhfd->vmhd", attention_weights, v)  # (video_batch_size, music_batch_size, num_heads, head_dim)
+        attention = rearrange(attention, "v m h d -> v m (h d)")  # (video_batch_size, music_batch_size, num_heads*head_dim)
+        o = self.out_proj(attention)  # (video_batch_size, music_batch_size, embed_dim)
         return o
 
 
@@ -245,7 +245,7 @@ class XPoolAggregator(nn.Module):
             music_features: (batch_size, seq_len, embed_dim)
             music_masks: (batch_size, seq_len)
         Output
-            out: (batch_size, batch_size, embed_dim)
+            out: (video_batch_size, music_batch_size, embed_dim)
         """
         num_head_tokens = 0
 
@@ -256,10 +256,10 @@ class XPoolAggregator(nn.Module):
             num_head_tokens += 1
 
         _, music_features = torch.split(music_features, [num_head_tokens, music_features.size(-2) - num_head_tokens], dim=-2)
-        video_embeds = self.layer_norm1(video_embeds)  # [batch_size, embed_dim]
-        music_features = self.layer_norm1(music_features)  # [batch_size, seq_len, embed_dim]
+        video_embeds = self.layer_norm1(video_embeds)  # [video_batch_size, embed_dim]
+        music_features = self.layer_norm1(music_features)  # [music_batch_size, seq_len, embed_dim]
 
-        # batch_size x batch_size x embed_dim
+        # video_batch_size x music_batch_size x embed_dim
         attn_out = self.cross_attn(video_embeds, music_features, music_masks)
         attn_out = self.layer_norm2(attn_out)
 

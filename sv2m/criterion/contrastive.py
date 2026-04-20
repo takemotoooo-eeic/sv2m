@@ -331,21 +331,18 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             if isinstance(video_aggregator, XPoolAggregator):
                 raise ValueError("video_aggregator cannot be XPoolAggregator")
             video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
+            video_embeddings = F.normalize(video_embeddings, p=2, dim=-1)
 
             if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings = music_aggregator(video_embeddings, global_music_features, global_music_masks)  # [batch_size, batch_size, embed_dim]
+                music_embeddings = music_aggregator(video_embeddings, global_music_features, global_music_masks)  # [video_batch_size, music_batch_size, embed_dim]
             else:
                 music_embeddings = music_aggregator(global_music_features, global_music_masks)  # [batch_size, embed_dim]
-            global_music_embeddings = music_embeddings
-            global_video_embeddings = video_embeddings
-
-            global_music_embeddings = F.normalize(global_music_embeddings, p=2, dim=-1)
-            global_video_embeddings = F.normalize(global_video_embeddings, p=2, dim=-1)
+            music_embeddings = F.normalize(music_embeddings, p=2, dim=-1)
 
             if isinstance(music_aggregator, XPoolAggregator):
-                similarity_matrix = torch.einsum("vmd,vd->mv", global_music_embeddings, global_video_embeddings)  # [batch_size, batch_size]
+                similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)  # [video_batch_size, music_batch_size]
             else:
-                similarity_matrix = torch.matmul(global_music_embeddings, global_video_embeddings.T)  # [batch_size, batch_size]
+                similarity_matrix = torch.matmul(video_embeddings, music_embeddings.T)  # [video_batch_size, music_batch_size]
             
             if similarity_matrix_sum is None:
                 similarity_matrix_sum = similarity_matrix
@@ -360,21 +357,22 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             labels = torch.arange(rank * local_batch_size, (rank + 1) * local_batch_size, device=device)
             start_index = rank * local_batch_size
             end_index = (rank + 1) * local_batch_size
-            local_similarity_m2t = similarity_matrix[start_index:end_index]
-            local_similarity_t2m = similarity_matrix.T[start_index:end_index]
+            local_similarity_v2m = similarity_matrix[start_index:end_index]
+            local_similarity_m2v = similarity_matrix.T[start_index:end_index]
             duplicate_mask = self._build_duplicate_mask(global_music_ids, start_index, end_index, device)
         else:
             labels = torch.arange(local_batch_size, device=device)
-            local_similarity_m2t = similarity_matrix
-            local_similarity_t2m = similarity_matrix.T
+            local_similarity_v2m = similarity_matrix
+            local_similarity_m2v = similarity_matrix.T
             duplicate_mask = self._build_duplicate_mask(global_music_ids, 0, local_batch_size, device)
 
         if duplicate_mask is not None:
-            local_similarity_m2t = local_similarity_m2t.masked_fill(duplicate_mask, float("-inf"))
+            local_similarity_v2m = local_similarity_v2m.masked_fill(duplicate_mask, float("-inf"))
+            local_similarity_m2v = local_similarity_m2v.masked_fill(duplicate_mask.T, float("-inf"))
 
         # Compute bidirectional cross-entropy loss
-        loss_m2t = F.cross_entropy(local_similarity_m2t, labels, reduction=self.reduction)
-        loss_t2m = F.cross_entropy(local_similarity_t2m, labels, reduction=self.reduction)
-        loss = (loss_m2t + loss_t2m) / 2
+        loss_v2m = F.cross_entropy(local_similarity_v2m, labels, reduction=self.reduction)
+        loss_m2v = F.cross_entropy(local_similarity_m2v, labels, reduction=self.reduction)
+        loss = (loss_v2m + loss_m2v) / 2
 
         return loss
