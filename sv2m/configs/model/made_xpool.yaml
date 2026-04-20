@@ -51,13 +51,7 @@ loss_fn:
     - _target_: sv2m.modules.aggregater.AverageAggregator
       insert_cls_token: false
       insert_dist_token: false
-    - _target_: sv2m.modules.aggregater.AverageAggregator
-      insert_cls_token: false
-      insert_dist_token: false  
   music_aggregators:
-    - _target_: sv2m.modules.aggregater.AverageAggregator
-      insert_cls_token: false
-      insert_dist_token: false  
     - _target_: sv2m.modules.aggregater.XPoolAggregator
       insert_cls_token: false
       insert_dist_token: false
@@ -67,3 +61,4 @@ loss_fn:
   temperature: 0.09
   min_temperature: 0.07
   delete_duplicate: true
+  

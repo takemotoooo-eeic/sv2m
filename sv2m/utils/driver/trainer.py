@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple
 import hydra
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler
@@ -18,7 +19,7 @@ from tqdm import tqdm
 
 from sv2m.models.made import MaDE
 from sv2m.criterion import retrieval_metrics
-from sv2m.modules.aggregater import XPoolAggregator
+from sv2m.modules.aggregater import XPoolAggregator 
 
 from ...amp import should_enable_amp
 from ...distributed import (
@@ -329,13 +330,17 @@ class MaDETrainer(Driver):
             similarity_matrix_sum = None
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 video_emb = video_aggregator(global_video_features, global_video_masks)
+                video_emb = F.normalize(video_emb, p=2, dim=-1)
 
                 if isinstance(music_aggregator, XPoolAggregator):
                     music_emb = music_aggregator(video_emb, global_music_features, global_music_masks)
+                    music_emb = F.normalize(music_emb, p=2, dim=-1)
                     sim = torch.einsum("vmd,vd->mv", music_emb, video_emb)
                 else:
                     music_emb = music_aggregator(global_music_features, global_music_masks)
+                    music_emb = F.normalize(music_emb, p=2, dim=-1)
                     sim = torch.matmul(music_emb, video_emb.T)
+                
 
                 if similarity_matrix_sum is None:
                     similarity_matrix_sum = sim
