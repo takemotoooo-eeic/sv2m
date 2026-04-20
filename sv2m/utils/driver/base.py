@@ -10,9 +10,7 @@ class BaseDriver(ABC):
 
     def set_commit_hash(self) -> None:
         try:
-            completed_process = subprocess.run(
-                "git rev-parse HEAD", shell=True, check=True, capture_output=True
-            )
+            completed_process = subprocess.run("git rev-parse HEAD", shell=True, check=True, capture_output=True)
             commit_hash = completed_process.stdout.decode().strip()
         except subprocess.CalledProcessError:
             commit_hash = None

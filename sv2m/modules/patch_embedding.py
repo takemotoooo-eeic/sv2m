@@ -10,8 +10,8 @@ from torch.nn.common_types import _size_2_t
 from torch.nn.modules.utils import _pair
 
 __all__ = [
-    "ModifiedPositionalPatchEmbedding",
-    "ModifiedPatchEmbedding",
+    "PositionalPatchEmbedding",
+    "PatchEmbedding",
 ]
 
 
@@ -162,9 +162,7 @@ class _PatchEmbedding(nn.Module):
         if self.dist_token is not None:
             num_head_tokens += 1
 
-        head_tokens, sequence = torch.split(
-            sequence, [num_head_tokens, length - num_head_tokens], dim=-2
-        )
+        head_tokens, sequence = torch.split(sequence, [num_head_tokens, length - num_head_tokens], dim=-2)
 
         return head_tokens, sequence
 
@@ -173,7 +171,7 @@ class _PatchEmbedding(nn.Module):
         """Compute output shape from shape of spectrogram."""
 
 
-class ModifiedPositionalPatchEmbedding(_PatchEmbedding):
+class PositionalPatchEmbedding(_PatchEmbedding):
     """Patch embedding + trainable positional embedding.
 
     Args:
@@ -350,9 +348,7 @@ class ModifiedPositionalPatchEmbedding(_PatchEmbedding):
             )
         elif width > width_org:
             positional_embedding = positional_embedding.unsqueeze(dim=0)
-            positional_embedding = F.interpolate(
-                positional_embedding, size=(height_org, width), mode=mode
-            )
+            positional_embedding = F.interpolate(positional_embedding, size=(height_org, width), mode=mode)
             positional_embedding = positional_embedding.squeeze(dim=0)
 
         if height_org > height:
@@ -364,9 +360,7 @@ class ModifiedPositionalPatchEmbedding(_PatchEmbedding):
             )
         elif height > height_org:
             positional_embedding = positional_embedding.unsqueeze(dim=0)
-            positional_embedding = F.interpolate(
-                positional_embedding, size=(height, width), mode=mode
-            )
+            positional_embedding = F.interpolate(positional_embedding, size=(height, width), mode=mode)
             positional_embedding = positional_embedding.squeeze(dim=0)
 
         output = positional_embedding
@@ -382,7 +376,7 @@ class ModifiedPositionalPatchEmbedding(_PatchEmbedding):
         return height, width
 
 
-class ModifiedPatchEmbedding(_PatchEmbedding):
+class PatchEmbedding(_PatchEmbedding):
     """Patch embedding w/o positional embedding.
 
     Args:

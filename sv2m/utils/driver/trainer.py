@@ -12,8 +12,10 @@ import hydra
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
+
+from sv2m.models.made import MaDE
 
 from ...amp import should_enable_amp
 from ...distributed import (
@@ -51,20 +53,20 @@ class MaDETrainer(Driver):
         *,
         training_dataloader: DataLoader = None,
         validation_dataloader: Optional[DataLoader] = None,
-        # model: MaDe = None,
-        # optimizer: torch.optim.Optimizer = None,
-        # scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        model: MaDE = None,
+        optimizer: torch.optim.Optimizer = None,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         config: DictConfig = None,
         device: Optional[torch.device] = None,
     ) -> None:
-        # unwrapped_model = unwrap(model)
+        unwrapped_model = unwrap(model)
 
-        # assert isinstance(unwrapped_model, MaDe), "Only MaDe is supported as model."
+        assert isinstance(unwrapped_model, MaDE), "Only MaDE is supported as model."
         self.training_dataloader = training_dataloader
         self.validation_dataloader = validation_dataloader
-        # self.model = model
-        # self.optimizer = optimizer
-        # self.scheduler = scheduler
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         self.config = config
 
         self._reset(config, device=device)
@@ -76,8 +78,8 @@ class MaDETrainer(Driver):
     ) -> None:
         training_config = config.train
 
-        # if device is None:
-        #     device = next(self.model.parameters()).device
+        if device is None:
+            device = next(self.model.parameters()).device
 
         dtype = convert_dtype(training_config.torch_dtype)
         enable_amp = should_enable_amp(dtype)
@@ -113,11 +115,11 @@ class MaDETrainer(Driver):
             "training_loss": [],
             "validation_loss": [],
         }
-        # for index, _ in enumerate(self.optimizer.param_groups):
-        #     self.history[f"learning_rate_{index}"] = []
+        for index, _ in enumerate(self.optimizer.param_groups):
+            self.history[f"learning_rate_{index}"] = []
 
-        # unwrapped_model = unwrap(self.model)
-        # self.logger.info(unwrapped_model)
+        unwrapped_model = unwrap(self.model)
+        self.logger.info(unwrapped_model)
 
         if training_config.checkpoint.resume_from:
             self.load_checkpoint(training_config.checkpoint.resume_from)
@@ -135,7 +137,7 @@ class MaDETrainer(Driver):
             dict: Training metrics for the epoch.
 
         """
-        # self.model.train()
+        self.model.train()
 
         self.set_epoch_if_possible(dataloader)
 
@@ -145,18 +147,24 @@ class MaDETrainer(Driver):
         pbar = tqdm(dataloader, desc=f"Epoch {self.epoch + 1}", disable=self.rank != 0)
 
         for batch_index, batch in enumerate(pbar):
-            print(batch)
-            video_input = batch["video"]
-            music_input = batch["audio"]
+            video_input = batch["video_feats"]
+            music_input = batch["music_feats"]
+            video_mask = batch["video_masks"]
+            music_mask = batch["music_masks"]
+            music_ids = batch["music_id"]
 
             video_input = video_input.to(self.device)
             music_input = music_input.to(self.device)
-
+            video_mask = video_mask.to(self.device)
+            music_mask = music_mask.to(self.device)
             self.optimizer.zero_grad()
 
-            video_embeddings, music_embeddings, loss = self.model(
+            video_embeddings, video_mask, music_embeddings, music_mask, loss = self.model(
                 video_input=video_input,
+                video_mask=video_mask,
                 music_input=music_input,
+                music_mask=music_mask,
+                music_ids=music_ids,
                 apply_normalization=True,
             )
             loss.backward()
@@ -167,9 +175,7 @@ class MaDETrainer(Driver):
             average_loss = total_training_loss / num_training_batches
 
             self.iteration += 1
-            self.writer.add_scalar(
-                "training_loss/iteration", loss.item(), global_step=self.iteration
-            )
+            self.writer.add_scalar("training_loss/iteration", loss.item(), global_step=self.iteration)
 
             for index, param_group in enumerate(self.optimizer.param_groups):
                 self.writer.add_scalar(
@@ -279,9 +285,7 @@ class MaDETrainer(Driver):
             validation_metrics = self.validate_for_epoch(validation_dataloader)
 
             for metric_key, metric_value in validation_metrics.items():
-                self.writer.add_scalar(
-                    f"{metric_key}/epoch", metric_value, global_step=self.epoch + 1
-                )
+                self.writer.add_scalar(f"{metric_key}/epoch", metric_value, global_step=self.epoch + 1)
 
             self.epoch += 1
 
@@ -293,10 +297,7 @@ class MaDETrainer(Driver):
                 path = path.format(epoch=self.epoch)
                 self.save_checkpoint(path)
 
-            self.logger.info(
-                f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}, "
-                f"validation_loss={validation_loss:.4f}"
-            )
+            self.logger.info(f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}, validation_loss={validation_loss:.4f}")
 
             if validation_metrics["validation_loss"] < self.best_validation_loss:
                 self.best_validation_loss = validation_metrics["validation_loss"]
@@ -348,9 +349,7 @@ class MaDETrainer(Driver):
         iterations = training_config.steps.iterations
 
         if (epochs is None) == (iterations is None):
-            raise ValueError(
-                "Set either of config.train.steps.epochs or config.train.steps.iterations."
-            )
+            raise ValueError("Set either of config.train.steps.epochs or config.train.steps.iterations.")
 
         if iterations is not None:
             raise NotImplementedError("iteraions is not supported")
@@ -360,13 +359,11 @@ class MaDETrainer(Driver):
             "validation_loss": [],
         }
 
-        # for index, _ in enumerate(self.optimizer.param_groups):
-        #     history[f"learning_rate_{index}"] = []
+        for index, _ in enumerate(self.optimizer.param_groups):
+            history[f"learning_rate_{index}"] = []
 
         for _ in range(self.epoch, epochs):
-            training_metrics, validation_metrics = self.run_for_epoch(
-                training_dataloader, validation_dataloader
-            )
+            training_metrics, validation_metrics = self.run_for_epoch(training_dataloader, validation_dataloader)
 
             for metric_key, metric_value in training_metrics.items():
                 if metric_key in history:
@@ -469,15 +466,11 @@ class MaDETrainer(Driver):
             dataloader.set_epoch(self.epoch)
         else:
             if hasattr(dataloader, "sampler") and dataloader.sampler is not None:
-                if hasattr(dataloader.sampler, "set_epoch") and callable(
-                    dataloader.sampler.set_epoch
-                ):
+                if hasattr(dataloader.sampler, "set_epoch") and callable(dataloader.sampler.set_epoch):
                     dataloader.sampler.set_epoch(self.epoch)
 
             if hasattr(dataloader, "batch_sampler") and dataloader.batch_sampler is not None:
-                if hasattr(dataloader.batch_sampler, "set_epoch") and callable(
-                    dataloader.batch_sampler.set_epoch
-                ):
+                if hasattr(dataloader.batch_sampler, "set_epoch") and callable(dataloader.batch_sampler.set_epoch):
                     dataloader.batch_sampler.set_epoch(self.epoch)
 
     @classmethod
@@ -502,9 +495,7 @@ class MaDETrainer(Driver):
             training_dataset = hydra.utils.instantiate(dataloader_config.train.dataset)
             validation_dataset = hydra.utils.instantiate(dataloader_config.validate.dataset)
 
-            training_sampler = DistributedSampler(
-                training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed
-            )
+            training_sampler = DistributedSampler(training_dataset, num_replicas=world_size, rank=rank, seed=training_config.seed)
             training_dataloader_kwargs = {
                 "dataset": training_dataset,
                 "sampler": training_sampler,
@@ -533,27 +524,27 @@ class MaDETrainer(Driver):
             training_dataloader_kwargs = {}
             validation_dataloader_kwargs = {}
 
-        training_dataloader = hydra.utils.instantiate(
-            dataloader_config.train, **training_dataloader_kwargs
-        )
-        validation_dataloader = hydra.utils.instantiate(
-            dataloader_config.validate, **validation_dataloader_kwargs
+        training_dataloader = hydra.utils.instantiate(dataloader_config.train, **training_dataloader_kwargs)
+        validation_dataloader = hydra.utils.instantiate(dataloader_config.validate, **validation_dataloader_kwargs)
+
+        model = hydra.utils.instantiate(model_config)
+        model = set_device(
+            model,
+            accelerator=accelerator,
+            is_distributed=is_distributed_mode(),
+            ddp_kwargs=training_config.ddp_kwargs,
         )
 
-        # model = hydra.utils.instantiate(model_config)
-        # model = set_device(
-        #     model,
-        #     accelerator=accelerator,
-        #     is_distributed=is_distributed_mode(),
-        #     ddp_kwargs=training_config.ddp_kwargs,
-        # )
-
-        # optimizer = hydra.utils.instantiate(optimizer_config, model.parameters())
-        # scheduler = hydra.utils.instantiate(scheduler_config, optimizer)
-        # device = next(model.parameters()).device
+        optimizer = hydra.utils.instantiate(optimizer_config, model.parameters())
+        scheduler = hydra.utils.instantiate(scheduler_config, optimizer)
+        device = next(model.parameters()).device
 
         return cls(
             training_dataloader=training_dataloader,
             validation_dataloader=validation_dataloader,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
             config=config,
+            device=device,
         )

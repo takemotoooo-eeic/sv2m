@@ -1,4 +1,3 @@
-import warnings
 from typing import Any, Iterator
 
 import torch
@@ -8,6 +7,7 @@ from torch.utils.data.distributed import DistributedSampler
 __all__ = [
     "MGSVECLoader",
 ]
+
 
 class MGSVECLoader:
     """Distributed-aware DataLoader wrapper for MGSVEC datasets.

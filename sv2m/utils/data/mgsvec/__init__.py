@@ -1,9 +1,9 @@
+import os
 import warnings
 from typing import List, Optional, Union
-import os
 
-import torch
 import pandas as pd
+import torch
 from torch.utils.data import Dataset
 
 
@@ -22,7 +22,6 @@ class BaseMGSVECDataset(Dataset):
         music_max_duration: int,
         max_video_frames: int,
         stride: float,
-        filter: float,
         subset: Optional[Union[str, List[str]]] = None,
         length: Optional[int] = None,
         crop_music_feat: bool = False,
@@ -39,7 +38,6 @@ class BaseMGSVECDataset(Dataset):
             music_max_duration: Maximum duration used to normalize the target music span.
             max_video_frames: Maximum number of video frames to keep in metadata.
             stride: Temporal stride between music feature frames.
-            filter: Temporal window size used when cropping music features by span.
             subset: Subset name(s) to load. If None, all available subsets are loaded.
                 Can be a string or a list of strings.
             length: Total number of samples. If None, the length is inferred from the
@@ -66,14 +64,12 @@ class BaseMGSVECDataset(Dataset):
         self.video_feat_dir = video_feat_dir
         self.music_feat_dir = music_feat_dir
 
-
         csv_data = [pd.read_csv(csv_path) for csv_path in self.csv_paths]
         self.csv_data = pd.concat(csv_data, ignore_index=True)
 
         self.max_music_duration = music_max_duration
         self.max_video_frames = max_video_frames
         self.stride = stride
-        self.filter = filter
 
         self.crop_music_feat = crop_music_feat
 
@@ -92,24 +88,24 @@ class BaseMGSVECDataset(Dataset):
         return self.length
 
     def _get_span_propotion(self, gt_spans: torch.Tensor) -> torch.Tensor:
-        '''
+        """
         Inputs:
             gt_spans: [1, 2]
             max_m_duration: float
         Outputs:
             propotion: [1, 2] (center_propotion, width_propotion)
-        '''
+        """
         gt_spans[:, 1] = torch.clamp(gt_spans[:, 1], max=self.max_music_duration)
         center_propotion = (gt_spans[:, 0] + gt_spans[:, 1]) / 2.0 / self.max_music_duration  # [1]
         width_propotion = (gt_spans[:, 1] - gt_spans[:, 0]) / self.max_music_duration  # [1]
         return torch.stack([center_propotion, width_propotion], dim=-1)  # [1, 2]
-    
+
     def _crop_feats_by_span(
-        self, 
+        self,
         music_feats: torch.Tensor,
         music_mask: torch.Tensor,
         music_start_time: float,
-        music_end_time: float
+        music_end_time: float,
     ):
         """
         Crop music segments to the GT music span only by masking out segments outside the span.
@@ -117,13 +113,12 @@ class BaseMGSVECDataset(Dataset):
         """
         if music_end_time < music_start_time:
             music_start_time, music_end_time = music_end_time, music_start_time
-        
-        half_filter = self.filter / 2.0
+
         centers = torch.arange(music_feats.shape[0], dtype=torch.float32) * self.stride
-        keep = (centers + half_filter >= music_start_time) & (centers - half_filter <= music_end_time)
-        
+        keep = (centers >= music_start_time) & (centers <= music_end_time)
+
         music_mask = music_mask * keep.to(music_mask.dtype)
-        music_feats = music_feats.masked_fill(keep.unsqueeze(-1) == 0, 0)
+        music_feats = music_feats[keep]
         return music_feats, music_mask
 
     def __getitem__(self, idx):
@@ -140,28 +135,20 @@ class BaseMGSVECDataset(Dataset):
         gt_windows_list = [(music_start_time, music_end_time)]
         gt_windows = torch.Tensor(gt_windows_list)  # [1, 2]
 
-        metadata = {
-            "video_id": str(video_id),
-            "music_id": str(music_id),
-            "video_duration": torch.tensor(video_end_time - video_start_time),
-            "music_duration": torch.tensor(music_duration),
-            "gt_moment": gt_windows,  # [1, 2]
-        }
-
         # target spans
         spans_target = self._get_span_propotion(gt_windows)  # [1, 2]
 
         # extract features
-        video_feature_path = os.path.join(self.video_feat_dir, 'vit_feature', f'{video_id}.pt')
-        video_mask_path = os.path.join(self.video_feat_dir, 'vit_mask', f'{video_id}.pt')
-        video_feats = torch.load(video_feature_path, map_location='cpu')
-        video_masks = torch.load(video_mask_path, map_location='cpu')
+        video_feature_path = os.path.join(self.video_feat_dir, "vit_feature", f"{video_id}.pt")
+        video_mask_path = os.path.join(self.video_feat_dir, "vit_mask", f"{video_id}.pt")
+        video_feats = torch.load(video_feature_path, map_location="cpu")
+        video_masks = torch.load(video_mask_path, map_location="cpu")
         video_feats = video_feats.masked_fill(video_masks.unsqueeze(-1) == 0, 0)  # [bs, max_frame_num, 512]
 
-        music_feature_path = os.path.join(self.music_feat_dir, 'ast_feature', f'{music_id}.pt')
-        music_mask_path = os.path.join(self.music_feat_dir, 'ast_mask', f'{music_id}.pt')
-        music_feats = torch.load(music_feature_path, map_location='cpu')
-        music_mask = torch.load(music_mask_path, map_location='cpu')  
+        music_feature_path = os.path.join(self.music_feat_dir, "ast_feature", f"{music_id}.pt")
+        music_mask_path = os.path.join(self.music_feat_dir, "ast_mask", f"{music_id}.pt")
+        music_feats = torch.load(music_feature_path, map_location="cpu")
+        music_mask = torch.load(music_mask_path, map_location="cpu")
         music_feats = music_feats.masked_fill(music_mask.unsqueeze(-1) == 0, 0)  # [bs, max_snippet_num, 768]
 
         if self.crop_music_feat:
@@ -172,13 +159,19 @@ class BaseMGSVECDataset(Dataset):
                 music_end_time,
             )
 
-        tensors = {
+        output = {
+            "video_id": str(video_id),
+            "music_id": str(music_id),
+            "video_duration": torch.tensor(video_end_time - video_start_time),
+            "music_duration": torch.tensor(music_duration),
+            "gt_moment": gt_windows,  # [1, 2]
+            "spans_target": spans_target,  # [1, 2]
             "video_feats": video_feats,
             "video_masks": video_masks,
             "music_feats": music_feats,
-            "music_mask": music_mask,
+            "music_masks": music_mask,
         }
-        return tensors, metadata, spans_target
+        return output
 
 
 class TrainingMGSVECDataset(BaseMGSVECDataset):
@@ -195,7 +188,6 @@ class TrainingMGSVECDataset(BaseMGSVECDataset):
         music_max_duration: int,
         max_video_frames: int,
         stride: float,
-        filter: float,
         subset: Optional[Union[str, List[str]]] = None,
         length: Optional[int] = None,
         crop_music_feat: bool = False,
@@ -207,7 +199,6 @@ class TrainingMGSVECDataset(BaseMGSVECDataset):
             music_max_duration=music_max_duration,
             max_video_frames=max_video_frames,
             stride=stride,
-            filter=filter,
             subset=subset,
             length=length,
             crop_music_feat=crop_music_feat,
@@ -228,7 +219,6 @@ class InferenceMGSVECDataset(BaseMGSVECDataset):
         music_max_duration: int,
         max_video_frames: int,
         stride: float,
-        filter: float,
         subset: Optional[Union[str, List[str]]] = None,
         length: Optional[int] = None,
         crop_music_feat: bool = False,
@@ -240,7 +230,6 @@ class InferenceMGSVECDataset(BaseMGSVECDataset):
             music_max_duration=music_max_duration,
             max_video_frames=max_video_frames,
             stride=stride,
-            filter=filter,
             subset=subset,
             length=length,
             crop_music_feat=crop_music_feat,

@@ -10,20 +10,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tower import ModalTowerWrapper
-from .video import CLIPVideoEncoder
+from .encoder import UnimodalEncoder
 
 __all__ = [
-    "MVPt",
-    "ModalTowerWrapper",
-    "CLIPVideoEncoder",
+    "MaDE",
+    "UnimodalEncoder",
 ]
 
 
-class MVPt(nn.Module):
-    """MVPt model for video-music contrastive learning.
+class MaDE(nn.Module):
+    """MaDE model for video-music contrastive learning.
 
-    The MVPt model learns joint representations of video and music by encoding
+    The MaDE model learns joint representations of video and music by encoding
     both modalities into a shared embedding space using separate encoder towers
     and training with contrastive loss.
 
@@ -37,12 +35,12 @@ class MVPt(nn.Module):
             returns embeddings. Default: None.
 
     Examples:
-        >>> from musreel.models.mvpt import MVPt, ModalTowerWrapper
-        >>> from musreel.criterion import CrossModalInfoNCELoss
-        >>> video_encoder = ModalTowerWrapper(video_backbone, out_channels=128)
-        >>> music_encoder = ModalTowerWrapper(audio_backbone, out_channels=128)
+        >>> from sv2m.models.made import MaDE, ModalTowerWrapper
+        >>> from sv2m.criterion import CrossModalInfoNCELoss
+        >>> video_encoder = UnimodalEncoder(projector=video_projector, temporal_backbone=video_backbone, activation=True)
+        >>> music_encoder = UnimodalEncoder(projector=music_projector, temporal_backbone=music_backbone, activation=True)
         >>> loss_fn = CrossModalInfoNCELoss(temperature=0.1)
-        >>> model = MVPt(video_encoder, music_encoder, loss_fn)
+        >>> model = MaDE(video_encoder, music_encoder, loss_fn)
         >>> video_embedding, music_embedding, loss = model(video_input, music_input, apply_normalization=True)
 
     """  # noqa: E501
@@ -63,6 +61,9 @@ class MVPt(nn.Module):
         self,
         video_input: torch.Tensor,
         music_input: torch.Tensor,
+        video_mask: Optional[torch.Tensor] = None,
+        music_mask: Optional[torch.Tensor] = None,
+        music_ids: Optional[list[str]] = None,
         apply_normalization: Optional[Union[bool, Callable]] = True,
     ) -> Union[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Forward pass of MVPt.
@@ -70,6 +71,10 @@ class MVPt(nn.Module):
         Args:
             video_input (torch.Tensor): Video input tensor.
             music_input (torch.Tensor): Music input tensor.
+            video_mask (Optional[torch.Tensor]): Video mask tensor.
+            music_mask (Optional[torch.Tensor]): Music mask tensor.
+            video_ids (Optional[list[str]]): Video ids.
+            music_ids (Optional[list[str]]): Music ids.
             apply_normalization (Optional[Union[bool, Callable]]): Normalization to apply to embeddings.
                 If None, applies L2 normalization by default.
                 If bool True, applies L2 normalization.
@@ -81,8 +86,8 @@ class MVPt(nn.Module):
                 If loss_fn is None: Returns tuple of (video_embeddings, music_embeddings)
                 If loss_fn is provided: Returns tuple of (video_embeddings, music_embeddings, loss)
         """  # noqa: E501
-        video_embeddings = self.video_encoder(video_input)
-        music_embeddings = self.music_encoder(music_input)
+        video_embeddings, video_mask = self.video_encoder(video_input, video_mask)
+        music_embeddings, music_mask = self.music_encoder(music_input, music_mask)
 
         if apply_normalization is None:
             pass
@@ -100,8 +105,14 @@ class MVPt(nn.Module):
             raise ValueError(f"Invalid apply_normalization type: {type(apply_normalization)}")
 
         if self.loss_fn is None:
-            return video_embeddings, music_embeddings
+            return video_embeddings, video_mask, music_embeddings, music_mask
 
-        loss = self.loss_fn(video_embeddings, music_embeddings)
+        loss = self.loss_fn(
+            video_features=video_embeddings,
+            video_masks=video_mask,
+            music_features=music_embeddings,
+            music_masks=music_mask,
+            music_ids=music_ids,
+        )
 
-        return video_embeddings, music_embeddings, loss
+        return video_embeddings, video_mask, music_embeddings, music_mask, loss

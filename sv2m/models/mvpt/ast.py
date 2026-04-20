@@ -2,7 +2,6 @@
 
 import copy
 import warnings
-from abc import abstractmethod
 from typing import Optional, Tuple, Union
 
 import torch
@@ -10,13 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.common_types import _size_2_t
 
-from ...modules.patch_embedding import PositionalPatchEmbedding
-from ...modules.head import Head, MLPHead
 from ...modules.aggregater import Aggregator, AverageAggregator, HeadTokensAggregator
-from ...utils import download_pretrained_model_from_vos
+from ...modules.head import Head, MLPHead
+from ...modules.patch_embedding import PositionalPatchEmbedding
 
 __all__ = [
-    "ModifiedAudioSpectrogramTransformer",
+    "AudioSpectrogramTransformer",
     "Aggregator",
     "AverageAggregator",
     "HeadTokensAggregator",
@@ -38,9 +36,7 @@ class _AudioSpectrogramTransformer(nn.Module):
         self.embedding = embedding
         self.backbone = backbone
 
-    def pad_by_length(
-        self, input: torch.Tensor, length: Optional[torch.LongTensor] = None
-    ) -> torch.Tensor:
+    def pad_by_length(self, input: torch.Tensor, length: Optional[torch.LongTensor] = None) -> torch.Tensor:
         """Pad feature by length.
 
         Args:
@@ -247,9 +243,7 @@ class _AudioSpectrogramTransformer(nn.Module):
 
         return output
 
-    def sequence_to_patches(
-        self, input: Union[torch.Tensor, torch.BoolTensor], height: int, width: int
-    ) -> torch.Tensor:
+    def sequence_to_patches(self, input: Union[torch.Tensor, torch.BoolTensor], height: int, width: int) -> torch.Tensor:
         r"""Convert (batch_size, max_length, \*) tensor to 3D (batch_size, height, width)
         or 4D (batch_size, embedding_dim, height, width) one.
         This method corresponds to inversion of ``patches_to_sequence``.
@@ -307,9 +301,7 @@ class _AudioSpectrogramTransformer(nn.Module):
     def prepend_head_tokens(self, sequence: torch.Tensor) -> torch.Tensor:
         return self.embedding.prepend_head_tokens(sequence)
 
-    def prepend_tokens(
-        self, sequence: torch.Tensor, tokens: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def prepend_tokens(self, sequence: torch.Tensor, tokens: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Prepaned tokens to sequence.
 
         This method is inversion of ``split_sequence``.
@@ -340,11 +332,11 @@ class _AudioSpectrogramTransformer(nn.Module):
         return self.embedding.embedding_dim
 
 
-class ModifiedAudioSpectrogramTransformer(_AudioSpectrogramTransformer):
+class AudioSpectrogramTransformer(_AudioSpectrogramTransformer):
     """Audio spectrogram transformer.
 
     Args:
-        embedding (mulan2025.modules.vit.ModifiedPositionalPatchEmbedding): Patch embedding
+        embedding (sv2m.modules.vit.PositionalPatchEmbedding): Patch embedding
             followed by positional embedding.
         backbone (nn.TransformerEncoder): Transformer (encoder).
 
@@ -364,129 +356,10 @@ class ModifiedAudioSpectrogramTransformer(_AudioSpectrogramTransformer):
 
         if self.aggregator is None and self.head is not None:
             warnings.warn(
-                "Head is given, but aggregator is not given, "
-                "which may lead to unexpected behavior.",
+                "Head is given, but aggregator is not given, which may lead to unexpected behavior.",
                 UserWarning,
                 stacklevel=2,
             )
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        stride: Optional[_size_2_t] = None,
-        n_bins: Optional[int] = None,
-        n_frames: Optional[int] = None,
-        aggregator: Optional[nn.Module] = None,
-        head: Optional[nn.Module] = None,
-        force_download: bool = False,
-    ) -> "ModifiedAudioSpectrogramTransformer":
-        """Build pretrained AudioSpectrogramTransformer.
-
-        Args:
-            pretrained_model_name_or_path (str): Path to pretrained model or name of pretrained model.
-            aggregator (nn.Module, optional): Aggregator module.
-            head (nn.Module, optional): Head module.
-
-        Examples:
-
-            >>> from mulan2025.models.ast import ModifiedAudioSpectrogramTransformer
-            >>> model = ModifiedAudioSpectrogramTransformer.from_pretrained("ast-base-stride10")
-
-        .. note::
-
-            Supported pretrained model names are
-                - ast-base-stride10
-
-        """  # noqa: E501
-
-        if pretrained_model_name_or_path == "ast-base-stride10":
-            expected_sha256 = "f30b1b777a1f849d644daff15895b85000150e9d5eaf2ede71f8beddac0ae2d1"
-            path = download_pretrained_model_from_vos(
-                "mulan2025/pretrained_models/public/modified-audio-spectrogram-transformer/ast-base-stride10.pth",
-                force_download=force_download,
-                sha256=expected_sha256,
-            )
-
-            d_model = 768
-            nhead = 12
-            dim_feedforward = 3072
-            out_channels = 527
-
-            kernel_size = 16
-            _stride = 10
-            _n_bins = 128
-            _n_frames = 1024
-
-            batch_first = True
-            norm_first = True
-            layer_norm_eps = 1e-6
-            num_layers = 12
-            activation = nn.GELU()
-            norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
-
-            insert_cls_token = True
-            insert_dist_token = True
-
-            embedding = PositionalPatchEmbedding(
-                d_model,
-                kernel_size=kernel_size,
-                stride=_stride,
-                insert_cls_token=insert_cls_token,
-                insert_dist_token=insert_dist_token,
-                n_bins=_n_bins,
-                n_frames=_n_frames,
-            )
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model,
-                nhead,
-                dim_feedforward,
-                activation=activation,
-                batch_first=batch_first,
-                norm_first=norm_first,
-                layer_norm_eps=layer_norm_eps,
-            )
-            backbone = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, norm=norm)
-            _aggregator = HeadTokensAggregator(
-                insert_cls_token=insert_cls_token,
-                insert_dist_token=insert_dist_token,
-            )
-            _head = MLPHead(
-                d_model,
-                out_channels,
-            )
-
-            model = ModifiedAudioSpectrogramTransformer(
-                embedding,
-                backbone,
-                aggregator=_aggregator,
-                head=_head,
-            )
-
-            state_dict = torch.load(
-                path,
-                map_location=lambda storage, loc: storage,
-            )
-            model.load_state_dict(state_dict)
-
-            # override aggregator and head if necessary
-            if aggregator is not None:
-                model.aggregator = aggregator
-
-            if head is not None:
-                model.head = head
-
-            # update patch embedding if necessary
-            model.embedding = _align_patch_embedding(
-                model.embedding, stride=stride, n_bins=n_bins, n_frames=n_frames
-            )
-        else:
-            raise ValueError(
-                "Only ast-base-stride10 is supported as pretrained model, "
-                f"but {pretrained_model_name_or_path} is given."
-            )
-
-        return model
 
     def forward(
         self,
@@ -519,7 +392,8 @@ class ModifiedAudioSpectrogramTransformer(_AudioSpectrogramTransformer):
             output = self.head(output)
 
         return output
-    
+
+
 def _align_patch_embedding(
     orig_patch_embedding: PositionalPatchEmbedding,
     stride: Optional[_size_2_t] = None,
@@ -560,9 +434,7 @@ def _align_patch_embedding(
     conv2d_state_dict = copy.deepcopy(pretrained_conv2d.state_dict())
     new_patch_embedding.conv2d.load_state_dict(conv2d_state_dict)
 
-    pretrained_positional_embedding = new_patch_embedding.resample_positional_embedding(
-        pretrained_positional_embedding, n_bins, n_frames
-    )
+    pretrained_positional_embedding = new_patch_embedding.resample_positional_embedding(pretrained_positional_embedding, n_bins, n_frames)
     new_patch_embedding.positional_embedding.data.copy_(pretrained_positional_embedding)
 
     if pretrained_insert_cls_token:

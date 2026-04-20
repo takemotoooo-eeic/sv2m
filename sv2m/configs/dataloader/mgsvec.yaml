@@ -6,17 +6,16 @@ train:
   _target_: sv2m.utils.data.MGSVECLoader
   dataset:
     _target_: sv2m.utils.data.mgsvec.TrainingMGSVECDataset
-    video_feat_dir: /Users/kentakem/sv2m/features/vit_feature1
-    music_feat_dir: /Users/kentakem/sv2m/features/ast_feature2p5
-    csv_root: /Users/kentakem/sv2m/dataset/MGSV-EC
+    video_feat_dir:
+    music_feat_dir:
+    csv_root:
     music_max_duration: 240
     max_video_frames: 50
     stride: 2.5
-    filter: 10
     subset: train
     length: 49194
     crop_music_feat: false
-  batch_size: 64
+  batch_size: 512
   shuffle: true
   drop_last: true
 
@@ -30,7 +29,6 @@ validate:
     music_max_duration: ${...train.dataset.music_max_duration}
     max_video_frames: ${...train.dataset.max_video_frames}
     stride: ${...train.dataset.stride}
-    filter: ${...train.dataset.filter}
     subset: val
     crop_music_feat: ${...train.dataset.crop_music_feat}
     length: 2000
@@ -48,10 +46,9 @@ evaluate:
     music_max_duration: ${...train.dataset.music_max_duration}
     max_video_frames: ${...train.dataset.max_video_frames}
     stride: ${...train.dataset.stride}
-    filter: ${...train.dataset.filter}
     subset: test
     crop_music_feat: ${...train.dataset.crop_music_feat}
     length: 2000
-  batch_size: 1
+  batch_size: 64
   shuffle: false
   drop_last: false
