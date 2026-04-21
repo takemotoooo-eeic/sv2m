@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from sv2m.models.made import MaDE
-from sv2m.criterion import retrieval_metrics, calculate_miou
+from sv2m.criterion import retrieval_metrics, calculate_miou, CrossModalLateInteractionLoss
 from sv2m.modules.aggregater import XPoolAggregator
 
 from ...distributed import unwrap
@@ -238,10 +238,10 @@ class MaDEEvaluator(Driver):
 
                 if isinstance(music_aggregator, XPoolAggregator):
                     music_emb, _ = music_aggregator(video_emb, global_music_features, global_music_masks, global_music_span_masks)
-                    sim = torch.einsum("vmd,vd->vm", music_emb, video_emb)
+                    sim = torch.einsum("vmd,vd->vm", music_emb, video_emb) / loss_fn.temperature
                 else:
                     music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
-                    sim = torch.matmul(video_emb, music_emb.T)
+                    sim = torch.matmul(video_emb, music_emb.T) / loss_fn.temperature
 
                 if similarity_matrix_sum is None:
                     similarity_matrix_sum = sim
@@ -249,8 +249,18 @@ class MaDEEvaluator(Driver):
                     similarity_matrix_sum = similarity_matrix_sum + sim
 
             sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
+        
+        elif isinstance(loss_fn, CrossModalLateInteractionLoss):
+            sim = loss_fn.compute_late_interaction_similarity_matrix(
+                global_video_features,
+                global_music_features,
+                global_video_masks,
+                global_music_masks,
+                global_music_span_masks,
+            ) / loss_fn.temperature
+            sim_matrix_np = sim.detach().cpu().numpy()
         else:
-            sim_matrix_np = torch.matmul(global_video_features, global_music_features.T).detach().cpu().numpy()
+            raise ValueError("Unsupported loss function for retrieval metrics calculation.")
 
         retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
         miou = calculate_miou(global_predicted_spans, global_spans_target, dataloader.dataset.max_music_duration)

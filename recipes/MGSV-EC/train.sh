@@ -14,7 +14,7 @@ csv_root="/Users/kentakem/sv2m/dataset/MGSV-EC"
 
 dataloader="mgsvec"
 train="made_mgsvec"
-model="made"
+model="made_li"
 optimizer="made"
 
 . ../_common/parse_options.sh || exit 1;
