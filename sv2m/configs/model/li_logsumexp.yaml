@@ -3,7 +3,6 @@ defaults:
   - _self_
 
 loss_fn:
-  _delete_: true
   _target_: sv2m.criterion.CrossModalInfoNCELoss
   temperature: 0.09
   min_temperature: 0.07
