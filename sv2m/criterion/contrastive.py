@@ -398,6 +398,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
                     music_span_masks=global_music_span_masks,
                 )
                 similarity_matrixs.append(similarity_matrix)
+                continue
             
             video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
 
