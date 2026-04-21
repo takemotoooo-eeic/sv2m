@@ -129,7 +129,7 @@ class MaDEEvaluator(Driver):
         all_music_span_masks = []
         all_spans_target = []
         all_predicted_spans = []
-        all_music_ids: list[str] = []
+        all_music_ids: list[list[str]] = []
 
         pbar = tqdm(dataloader, desc="Evaluation", disable=self.rank != 0)
 
@@ -166,12 +166,11 @@ class MaDEEvaluator(Driver):
                 all_spans_target.append(spans_target.detach().cpu())
 
                 if isinstance(music_ids, (list, tuple)):
-                    all_music_ids.extend([str(x) for x in music_ids])
+                    all_music_ids.append([str(x) for x in music_ids])
                 elif isinstance(music_ids, torch.Tensor):
-                    all_music_ids.extend([str(x.item()) for x in music_ids])
+                    all_music_ids.append([str(x.item()) for x in music_ids])
                 else:
-                    all_music_ids.append(str(music_ids))
-
+                    all_music_ids.append([str(music_ids)])
                 pbar.set_postfix(
                     {
                         "loss": loss.item(),
@@ -188,6 +187,7 @@ class MaDEEvaluator(Driver):
         local_music_span_masks = torch.cat(all_music_span_masks, dim=0)
         local_predicted_spans = torch.cat(all_predicted_spans, dim=0)
         local_spans_target = torch.cat(all_spans_target, dim=0)
+        local_music_ids = [music_id for rank_ids in all_music_ids for music_id in rank_ids]
 
         if is_distributed_mode():
             world_size = dist.get_world_size()
@@ -206,7 +206,7 @@ class MaDEEvaluator(Driver):
             dist.all_gather_object(gathered_music_features, local_music_features)
             dist.all_gather_object(gathered_music_masks, local_music_masks)
             dist.all_gather_object(gathered_music_span_masks, local_music_span_masks)
-            dist.all_gather_object(gathered_music_ids, all_music_ids)
+            dist.all_gather_object(gathered_music_ids, local_music_ids)
             dist.all_gather_object(gathered_predicted_spans, local_predicted_spans)
             dist.all_gather_object(gathered_spans_target, local_spans_target)
 
@@ -224,7 +224,7 @@ class MaDEEvaluator(Driver):
             global_music_features = local_music_features.to(self.device)
             global_music_masks = local_music_masks.to(self.device)
             global_music_span_masks = local_music_span_masks.to(self.device)
-            global_music_ids = all_music_ids
+            global_music_ids = local_music_ids
             global_predicted_spans = local_predicted_spans.to(self.device)
             global_spans_target = local_spans_target.to(self.device)
 

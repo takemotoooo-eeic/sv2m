@@ -164,15 +164,15 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             device,
         )
 
-    def _build_duplicate_mask(
+    def build_duplicate_mask(
         self,
         candidate_ids: list[str],
-        row_start: int,
-        row_end: int,
         device: torch.device,
     ) -> Optional[torch.Tensor]:
-        """Build mask to exclude negatives sharing the same source id.
+        """Build global square mask to exclude negatives sharing the same source id.
 
+        The returned mask has shape ``[global_batch, global_batch]`` and can be
+        sliced/transposed in the same way as the similarity matrix.
         The positive pair on the diagonal is kept unmasked.
         """
         if not self.delete_duplicate:
@@ -180,13 +180,14 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
         if candidate_ids is None:
             return None
 
-        mask = torch.zeros((row_end - row_start, len(candidate_ids)), dtype=torch.bool, device=device)
+        global_batch_size = len(candidate_ids)
+        mask = torch.zeros((global_batch_size, global_batch_size), dtype=torch.bool, device=device)
         has_duplicate = False
-        for local_row, global_row in enumerate(range(row_start, row_end)):
-            row_id = candidate_ids[global_row]
+        for row in range(global_batch_size):
+            row_id = candidate_ids[row]
             for col, col_id in enumerate(candidate_ids):
-                if col != global_row and col_id == row_id:
-                    mask[local_row, col] = True
+                if col != row and col_id == row_id:
+                    mask[row, col] = True
                     has_duplicate = True
         return mask if has_duplicate else None
 
@@ -420,16 +421,23 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             end_index = (rank + 1) * local_batch_size
             local_similarity_v2m = similarity_matrix[start_index:end_index]
             local_similarity_m2v = similarity_matrix.T[start_index:end_index]
-            duplicate_mask = self._build_duplicate_mask(global_music_ids, start_index, end_index, device)
+            duplicate_mask = self.build_duplicate_mask(global_music_ids, device)
         else:
             labels = torch.arange(local_batch_size, device=device)
             local_similarity_v2m = similarity_matrix
             local_similarity_m2v = similarity_matrix.T
-            duplicate_mask = self._build_duplicate_mask(global_music_ids, 0, local_batch_size, device)
+            duplicate_mask = self.build_duplicate_mask(global_music_ids, device)
 
         if duplicate_mask is not None:
-            local_similarity_v2m = local_similarity_v2m.masked_fill(duplicate_mask, float("-inf"))
-            local_similarity_m2v = local_similarity_m2v.masked_fill(duplicate_mask.T, float("-inf"))
+            if is_distributed:
+                local_duplicate_mask_v2m = duplicate_mask[start_index:end_index]
+                local_duplicate_mask_m2v = duplicate_mask.T[start_index:end_index]
+            else:
+                local_duplicate_mask_v2m = duplicate_mask
+                local_duplicate_mask_m2v = duplicate_mask.T
+
+            local_similarity_v2m = local_similarity_v2m.masked_fill(local_duplicate_mask_v2m, float("-inf"))
+            local_similarity_m2v = local_similarity_m2v.masked_fill(local_duplicate_mask_m2v, float("-inf"))
 
         # Compute bidirectional cross-entropy loss
         loss_v2m = F.cross_entropy(local_similarity_v2m, labels, reduction=self.reduction)

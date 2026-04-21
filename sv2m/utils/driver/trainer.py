@@ -269,7 +269,7 @@ class MaDETrainer(Driver):
         all_music_span_masks = []
         all_spans_target = []
         all_predicted_spans = []
-        all_music_ids: list[str] = []
+        all_music_ids: list[list[str]] = []
 
         pbar = tqdm(dataloader, desc="Validation", disable=self.rank != 0)
 
@@ -329,9 +329,9 @@ class MaDETrainer(Driver):
                 all_spans_target.append(spans_target.detach().cpu())
 
                 if isinstance(music_ids, (list, tuple)):
-                    all_music_ids.extend([str(x) for x in music_ids])
+                    all_music_ids.append([str(x) for x in music_ids])
                 elif isinstance(music_ids, torch.Tensor):
-                    all_music_ids.extend([str(x.item()) for x in music_ids])
+                    all_music_ids.append([str(x.item()) for x in music_ids])
                 else:
                     all_music_ids.append(str(music_ids))
 
@@ -341,6 +341,7 @@ class MaDETrainer(Driver):
         local_video_masks = torch.cat(all_video_masks, dim=0)
         local_music_features = torch.cat(all_music_features, dim=0)
         local_music_masks = torch.cat(all_music_masks, dim=0)
+        local_music_ids = [music_id for rank_ids in all_music_ids for music_id in rank_ids]
         local_music_span_masks = torch.cat(all_music_span_masks, dim=0)
         local_predicted_spans = torch.cat(all_predicted_spans, dim=0)
         local_spans_target = torch.cat(all_spans_target, dim=0)
@@ -361,26 +362,26 @@ class MaDETrainer(Driver):
             dist.all_gather_object(gathered_video_masks, local_video_masks)
             dist.all_gather_object(gathered_music_features, local_music_features)
             dist.all_gather_object(gathered_music_masks, local_music_masks)
-            dist.all_gather_object(gathered_music_span_masks, all_music_span_masks)
-            dist.all_gather_object(gathered_music_ids, all_music_ids)
+            dist.all_gather_object(gathered_music_span_masks, local_music_span_masks)
+            dist.all_gather_object(gathered_music_ids, local_music_ids)
             dist.all_gather_object(gathered_predicted_spans, local_predicted_spans)
-            dist.all_gather_object(gathered_spans_target, all_spans_target)
+            dist.all_gather_object(gathered_spans_target, local_spans_target)
 
             global_video_features = torch.cat(gathered_video_features, dim=0).to(self.device)
             global_video_masks = torch.cat(gathered_video_masks, dim=0).to(self.device)
             global_music_features = torch.cat(gathered_music_features, dim=0).to(self.device)
             global_music_masks = torch.cat(gathered_music_masks, dim=0).to(self.device)
             global_music_ids = [music_id for rank_ids in gathered_music_ids for music_id in rank_ids]
-            global_music_span_masks = torch.cat([mask for rank_masks in gathered_music_span_masks for mask in rank_masks], dim=0).to(self.device)
-            global_predicted_spans = torch.cat([span for rank_spans in gathered_predicted_spans for span in rank_spans], dim=0).to(self.device)
-            global_spans_target = torch.cat([span for rank_spans in gathered_spans_target for span in rank_spans], dim=0).to(self.device)
+            global_music_span_masks = torch.cat(gathered_music_span_masks, dim=0).to(self.device)
+            global_predicted_spans = torch.cat(gathered_predicted_spans, dim=0).to(self.device)
+            global_spans_target = torch.cat(gathered_spans_target, dim=0).to(self.device)
         else:
             global_video_features = local_video_features.to(self.device)
             global_video_masks = local_video_masks.to(self.device)
             global_music_features = local_music_features.to(self.device)
             global_music_masks = local_music_masks.to(self.device)
+            global_music_ids = local_music_ids
             global_music_span_masks = local_music_span_masks.to(self.device)
-            global_music_ids = all_music_ids
             global_predicted_spans = local_predicted_spans.to(self.device)
             global_spans_target = local_spans_target.to(self.device)
 
