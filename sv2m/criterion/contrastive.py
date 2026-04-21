@@ -6,7 +6,7 @@ particularly for music-text contrastive learning in MuLan.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -37,6 +37,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
         self,
         video_aggregators: list[nn.Module],
         music_aggregators: list[nn.Module],
+        distribution_loss: Optional[nn.Module] = None,
         temperature: float = 0.1,
         min_temperature: float = 0.01,
         delete_duplicate: bool = False,
@@ -48,6 +49,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
         self.min_temperature = min_temperature
         self.video_aggregators = video_aggregators
         self.music_aggregators = music_aggregators
+        self.distribution_loss = distribution_loss
         self.reduction = reduction
         self.delete_duplicate = delete_duplicate
 
@@ -84,10 +86,11 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
         self,
         music_features: torch.Tensor,
         music_masks: torch.Tensor,
-        music_span_masks: Optional[torch.Tensor],
+        music_span_masks: torch.Tensor,
         video_features: torch.Tensor,
         video_masks: torch.Tensor,
-        music_ids: Optional[list[str]],
+        music_ids: list[str],
+        spans_target: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -134,6 +137,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_video_features = SyncFunction.apply(video_features, True)
             global_video_masks = SyncFunction.apply(video_masks, True)
             global_music_span_masks = SyncFunction.apply(music_span_masks, True)
+            global_spans_target = SyncFunction.apply(spans_target, True)
             
             gathered_music_ids: list[Optional[list[str]]] = [None for _ in range(dist.get_world_size())]
             dist.all_gather_object(gathered_music_ids, list(music_ids))
@@ -145,6 +149,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_video_masks = video_masks
             global_music_ids = music_ids
             global_music_span_masks = music_span_masks
+            global_spans_target = spans_target
 
         return (
             global_music_features,
@@ -153,6 +158,7 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_video_features,
             global_video_masks,
             global_music_ids,
+            global_spans_target,
             local_batch_size,
             is_distributed,
             device,
@@ -294,15 +300,39 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         - All gradients (model parameters and log_temperature) are automatically synchronized
     """
 
+    def __init__(
+        self,
+        video_aggregators: list[nn.Module],
+        music_aggregators: list[nn.Module],
+        temperature: float = 0.1,
+        min_temperature: float = 0.01,
+        delete_duplicate: bool = False,
+        distribution_loss: Optional[nn.Module] = None,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__(
+            video_aggregators=video_aggregators,
+            music_aggregators=music_aggregators,
+            temperature=temperature,
+            min_temperature=min_temperature,
+            delete_duplicate=delete_duplicate,
+            reduction=reduction,
+        )
+        self.distribution_loss = distribution_loss
+        self.last_contrastive_loss: float = 0.0
+        self.last_distribution_loss: float = 0.0
+        self.last_total_loss: float = 0.0
+
     def forward(
         self,
         music_features: torch.Tensor,
         music_masks: torch.Tensor,
         music_span_masks: Optional[torch.Tensor],
+        spans_target: Optional[torch.Tensor],
         music_ids: Optional[list[str]],
         video_features: torch.Tensor,
         video_masks: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Compute InfoNCE loss between music and video features.
 
         Args:
@@ -327,24 +357,25 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             global_video_features,
             global_video_masks,
             global_music_ids,
+            global_spans_target,
             local_batch_size,
             is_distributed,
             device,
-        ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids)
+        ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids, spans_target)
+
         similarity_matrix_sum = None
+        attention_weights = None
 
         for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
             if isinstance(video_aggregator, XPoolAggregator):
                 raise ValueError("video_aggregator cannot be XPoolAggregator")
             video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
-            video_embeddings = F.normalize(video_embeddings, p=2, dim=-1)
 
             if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
+                music_embeddings, attention_weights = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
             else:
                 music_embeddings = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
-            music_embeddings = F.normalize(music_embeddings, p=2, dim=-1)
-
+            
             if isinstance(music_aggregator, XPoolAggregator):
                 similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)  # [video_batch_size, music_batch_size]
             else:
@@ -379,6 +410,35 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         # Compute bidirectional cross-entropy loss
         loss_v2m = F.cross_entropy(local_similarity_v2m, labels, reduction=self.reduction)
         loss_m2v = F.cross_entropy(local_similarity_m2v, labels, reduction=self.reduction)
-        loss = (loss_v2m + loss_m2v) / 2
+        contrastive_loss = (loss_v2m + loss_m2v) / 2
 
-        return loss
+        if self.distribution_loss is not None:
+            if attention_weights is None:
+                raise ValueError("distribution_loss requires attention_weights(XPoolAggregator) from music_aggregator")
+            if is_distributed:
+                spans_target_for_loss = global_spans_target[start_index:end_index]
+                row_offset = start_index
+            else:
+                spans_target_for_loss = global_spans_target
+                row_offset = 0
+
+            if is_distributed:
+                attention_weights_for_loss = attention_weights[start_index:end_index]
+            else:
+                attention_weights_for_loss = attention_weights
+
+            distribution_loss = self.distribution_loss(
+                attention_weights=attention_weights_for_loss,
+                music_masks=global_music_masks,
+                span_target=spans_target_for_loss,
+                positive_col_offset=row_offset,
+            )
+        else:
+            distribution_loss = torch.tensor(0.0, device=device)
+
+        loss = contrastive_loss + distribution_loss
+
+        self.last_contrastive_loss = float(contrastive_loss.detach().item())
+        self.last_distribution_loss = float(distribution_loss.detach().item())
+        self.last_total_loss = float(loss.detach().item())
+        return loss, attention_weights

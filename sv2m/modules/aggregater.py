@@ -45,12 +45,14 @@ class AverageAggregator(Aggregator):
         insert_cls_token: bool = True,
         insert_dist_token: bool = True,
         use_span_mask: bool = False,
+        normalize_output: bool = True,
     ) -> None:
         super().__init__()
 
         self.insert_cls_token = insert_cls_token
         self.insert_dist_token = insert_dist_token
         self.use_span_mask = use_span_mask
+        self.normalize_output = normalize_output
 
     def forward(
         self,
@@ -97,6 +99,9 @@ class AverageAggregator(Aggregator):
         valid_count = mask.to(torch.long).sum(dim=-1, keepdim=True).clamp_min(1)
         output = x.sum(dim=-2) / valid_count
 
+        if self.normalize_output:
+            output = F.normalize(output, p=2, dim=-1)
+
         return output
 
 
@@ -113,6 +118,7 @@ class HeadTokensAggregator(Aggregator):
         self,
         insert_cls_token: bool = True,
         insert_dist_token: bool = True,
+        normalize_output: bool = True,
     ) -> None:
         super().__init__()
 
@@ -121,6 +127,7 @@ class HeadTokensAggregator(Aggregator):
 
         self.insert_cls_token = insert_cls_token
         self.insert_dist_token = insert_dist_token
+        self.normalize_output = normalize_output
 
     def forward(
         self,
@@ -152,6 +159,9 @@ class HeadTokensAggregator(Aggregator):
         head_tokens, _ = torch.split(input, [num_head_tokens, input.size(-2) - num_head_tokens], dim=-2)
         output = torch.mean(head_tokens, dim=-2)
 
+        if self.normalize_output:
+            output = F.normalize(output, p=2, dim=-1)
+
         return output
 
 
@@ -173,7 +183,7 @@ class CrossAttention(nn.Module):
         video_embeds: torch.Tensor,
         music_features: torch.Tensor,
         music_mask: Optional[torch.Tensor] = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Input
             video_embeds: (batch_size, embed_dim)
@@ -181,6 +191,7 @@ class CrossAttention(nn.Module):
             music_mask: (batch_size, seq_len)
         Output
             o: (video_batch_size, music_batch_size, embed_dim)
+            attention_weights_mean: (video_batch_size, music_batch_size, seq_len)
         """
         # video_batch_size x embed_dim
         q = self.q_proj(video_embeds)
@@ -201,11 +212,13 @@ class CrossAttention(nn.Module):
             music_mask = music_mask[None, :, None, :]  # (1, music_batch_size, 1, seq_len)
             attention_logits = attention_logits.masked_fill(music_mask == 0, float("-inf"))
         attention_weights = F.softmax(attention_logits, dim=-1)  # (video_batch_size, music_batch_size, num_heads, seq_len)
+        attention_weights_mean = attention_weights.mean(dim=-2)  # (video_batch_size, music_batch_size, seq_len)
 
         attention = torch.einsum("vmhf,mhfd->vmhd", attention_weights, v)  # (video_batch_size, music_batch_size, num_heads, head_dim)
         attention = rearrange(attention, "v m h d -> v m (h d)")  # (video_batch_size, music_batch_size, num_heads*head_dim)
         o = self.out_proj(attention)  # (video_batch_size, music_batch_size, embed_dim)
-        return o
+
+        return o, attention_weights_mean
 
 
 class XPoolAggregator(nn.Module):
@@ -217,6 +230,7 @@ class XPoolAggregator(nn.Module):
         insert_cls_token: bool = True,
         insert_dist_token: bool = True,
         use_span_mask: bool = False,
+        normalize_output: bool = True,
     ):
         super(XPoolAggregator, self).__init__()
 
@@ -224,6 +238,7 @@ class XPoolAggregator(nn.Module):
         self.insert_cls_token = insert_cls_token
         self.insert_dist_token = insert_dist_token
         self.use_span_mask = use_span_mask
+        self.normalize_output = normalize_output
 
         self.linear_proj = nn.Linear(dim_input, dim_input)
 
@@ -247,7 +262,7 @@ class XPoolAggregator(nn.Module):
         music_features: torch.Tensor,
         music_masks: Optional[torch.Tensor] = None,
         span_mask: Optional[torch.Tensor] = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Input
             video_embeds: (batch_size, embed_dim)
@@ -255,6 +270,7 @@ class XPoolAggregator(nn.Module):
             music_masks: (batch_size, seq_len)
         Output
             out: (video_batch_size, music_batch_size, embed_dim)
+            attention_weights: (video_batch_size, music_batch_size, seq_len) if return_attention_weights=True
         """
         num_head_tokens = 0
 
@@ -273,11 +289,14 @@ class XPoolAggregator(nn.Module):
             mask = span_mask
         else:
             mask = music_masks
-        attn_out = self.cross_attn(video_embeds, music_features, mask)
+        attn_out, attention_weights = self.cross_attn(video_embeds, music_features, mask)
         attn_out = self.layer_norm2(attn_out)
 
         linear_out = self.linear_proj(attn_out)
         out = attn_out + self.dropout(linear_out)
         out = self.layer_norm3(out)
 
-        return out
+        if self.normalize_output:
+            out = F.normalize(out, p=2, dim=-1)
+
+        return out, attention_weights

@@ -11,14 +11,13 @@ from typing import Any, Dict, Optional, Tuple
 import hydra
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from sv2m.models.made import MaDE
-from sv2m.criterion import retrieval_metrics
+from sv2m.criterion import retrieval_metrics, calculate_miou
 from sv2m.modules.aggregater import XPoolAggregator 
 
 from ...amp import should_enable_amp
@@ -117,7 +116,11 @@ class MaDETrainer(Driver):
         self.best_validation_loss = float("inf")
         self.history = {
             "training_loss": [],
+            "training_contrastive_loss": [],
+            "training_distribution_loss": [],
             "validation_loss": [],
+            "validation_contrastive_loss": [],
+            "validation_distribution_loss": [],
         }
         for index, _ in enumerate(self.optimizer.param_groups):
             self.history[f"learning_rate_{index}"] = []
@@ -146,6 +149,8 @@ class MaDETrainer(Driver):
         self.set_epoch_if_possible(dataloader)
 
         total_training_loss = 0
+        total_training_contrastive_loss = 0.0
+        total_training_distribution_loss = 0.0
         num_training_batches = 0
 
         pbar = tqdm(dataloader, desc=f"Epoch {self.epoch + 1}", disable=self.rank != 0)
@@ -156,6 +161,7 @@ class MaDETrainer(Driver):
             video_masks = batch["video_masks"]
             music_masks = batch["music_masks"]
             music_span_masks = batch["music_span_masks"]
+            spans_target = batch["spans_target"]
             music_ids = batch["music_id"]
 
             video_feats = video_feats.to(self.device)
@@ -163,28 +169,38 @@ class MaDETrainer(Driver):
             video_masks = video_masks.to(self.device)
             music_masks = music_masks.to(self.device)
             music_span_masks = music_span_masks.to(self.device)
+            spans_target = spans_target.to(self.device)
             self.optimizer.zero_grad()
 
-            _, _, _, _, loss = self.model(
+            _, _, _, _, loss, _ = self.model(
                 video_feats=video_feats,
                 video_masks=video_masks,
                 music_feats=music_feats,
                 music_masks=music_masks,
                 music_span_masks=music_span_masks,
+                spans_target=spans_target,
                 music_ids=music_ids,
                 apply_normalization=True,
             )
+
+            loss_fn = unwrap(self.model).loss_fn
+            contrastive_loss = float(getattr(loss_fn, "last_contrastive_loss", loss.detach().item()))
+            distribution_loss = float(getattr(loss_fn, "last_distribution_loss", 0.0))
+
             loss.backward()
             self.optimizer.step()
 
             total_training_loss += loss.item()
+            total_training_contrastive_loss += contrastive_loss
+            total_training_distribution_loss += distribution_loss
             num_training_batches += 1
             average_loss = total_training_loss / num_training_batches
 
             self.iteration += 1
             self.writer.add_scalar("training_loss/iteration", loss.item(), global_step=self.iteration)
+            self.writer.add_scalar("training_contrastive_loss/iteration", contrastive_loss, global_step=self.iteration)
+            self.writer.add_scalar("training_distribution_loss/iteration", distribution_loss, global_step=self.iteration)
 
-            loss_fn = unwrap(self.model).loss_fn
             self.writer.add_scalar(
                 "temperature/iteration",
                 float(loss_fn.temperature.detach().item()),
@@ -201,6 +217,8 @@ class MaDETrainer(Driver):
             pbar.set_postfix(
                 {
                     "loss": loss.item(),
+                    "cnt": contrastive_loss,
+                    "dist": distribution_loss,
                     "average_loss": average_loss,
                 }
             )
@@ -211,6 +229,8 @@ class MaDETrainer(Driver):
         average_loss = total_training_loss / num_training_batches
         metrics = {
             "training_loss": average_loss,
+            "training_contrastive_loss": total_training_contrastive_loss / num_training_batches,
+            "training_distribution_loss": total_training_distribution_loss / num_training_batches,
         }
 
         loss_fn = unwrap(self.model).loss_fn
@@ -237,6 +257,8 @@ class MaDETrainer(Driver):
         self.model.eval()
 
         total_validation_loss = 0
+        total_validation_contrastive_loss = 0.0
+        total_validation_distribution_loss = 0.0
         num_validation_batches = 0
 
         all_video_features = []
@@ -244,6 +266,8 @@ class MaDETrainer(Driver):
         all_music_features = []
         all_music_masks = []
         all_music_span_masks = []
+        all_spans_target = []
+        all_predicted_spans = []
         all_music_ids: list[str] = []
 
         pbar = tqdm(dataloader, desc="Validation", disable=self.rank != 0)
@@ -255,6 +279,7 @@ class MaDETrainer(Driver):
                 video_masks = batch["video_masks"]
                 music_masks = batch["music_masks"]
                 music_span_masks = batch["music_span_masks"]
+                spans_target = batch["spans_target"]
                 music_ids = batch["music_id"]
 
                 video_feats = video_feats.to(self.device)
@@ -262,24 +287,34 @@ class MaDETrainer(Driver):
                 video_masks = video_masks.to(self.device)
                 music_masks = music_masks.to(self.device)
                 music_span_masks = music_span_masks.to(self.device)
+                spans_target = spans_target.to(self.device)
 
-                video_embeddings, video_masks, music_embeddings, music_masks, loss = self.model(
+                video_embeddings, video_masks, music_embeddings, music_masks, loss, predict_spans = self.model(
                     video_feats=video_feats,
                     music_feats=music_feats,
                     video_masks=video_masks,
                     music_masks=music_masks,
                     music_span_masks=music_span_masks,
+                    spans_target=spans_target,
                     music_ids=music_ids,
                     apply_normalization=True,
                 )
 
+                loss_fn = unwrap(self.model).loss_fn
+                contrastive_loss = float(getattr(loss_fn, "last_contrastive_loss", loss.detach().item()))
+                distribution_loss = float(getattr(loss_fn, "last_distribution_loss", 0.0))
+
                 total_validation_loss += loss.item()
+                total_validation_contrastive_loss += contrastive_loss
+                total_validation_distribution_loss += distribution_loss
                 num_validation_batches += 1
                 average_loss = total_validation_loss / num_validation_batches
 
                 pbar.set_postfix(
                     {
                         "loss": loss.item(),
+                        "cnt": contrastive_loss,
+                        "dist": distribution_loss,
                         "average_loss": average_loss,
                     }
                 )
@@ -289,6 +324,8 @@ class MaDETrainer(Driver):
                 all_music_features.append(music_embeddings.detach().cpu())
                 all_music_masks.append(music_masks.detach().cpu())
                 all_music_span_masks.append(music_span_masks.detach().cpu())
+                all_predicted_spans.append(predict_spans.detach().cpu())
+                all_spans_target.append(spans_target.detach().cpu())
 
                 if isinstance(music_ids, (list, tuple)):
                     all_music_ids.extend([str(x) for x in music_ids])
@@ -303,7 +340,9 @@ class MaDETrainer(Driver):
         local_video_masks = torch.cat(all_video_masks, dim=0)
         local_music_features = torch.cat(all_music_features, dim=0)
         local_music_masks = torch.cat(all_music_masks, dim=0)
-        local_music_span_masks = torch.stack(all_music_span_masks)
+        local_music_span_masks = torch.cat(all_music_span_masks, dim=0)
+        local_predicted_spans = torch.cat(all_predicted_spans, dim=0)
+        local_spans_target = torch.cat(all_spans_target, dim=0)
 
         if is_distributed_mode():
             world_size = dist.get_world_size()
@@ -314,6 +353,8 @@ class MaDETrainer(Driver):
             gathered_music_masks = [None] * world_size
             gathered_music_ids = [None] * world_size
             gathered_music_span_masks = [None] * world_size
+            gathered_predicted_spans = [None] * world_size
+            gathered_spans_target = [None] * world_size
 
             dist.all_gather_object(gathered_video_features, local_video_features)
             dist.all_gather_object(gathered_video_masks, local_video_masks)
@@ -321,13 +362,17 @@ class MaDETrainer(Driver):
             dist.all_gather_object(gathered_music_masks, local_music_masks)
             dist.all_gather_object(gathered_music_span_masks, all_music_span_masks)
             dist.all_gather_object(gathered_music_ids, all_music_ids)
+            dist.all_gather_object(gathered_predicted_spans, local_predicted_spans)
+            dist.all_gather_object(gathered_spans_target, all_spans_target)
 
             global_video_features = torch.cat(gathered_video_features, dim=0).to(self.device)
             global_video_masks = torch.cat(gathered_video_masks, dim=0).to(self.device)
             global_music_features = torch.cat(gathered_music_features, dim=0).to(self.device)
             global_music_masks = torch.cat(gathered_music_masks, dim=0).to(self.device)
             global_music_ids = [music_id for rank_ids in gathered_music_ids for music_id in rank_ids]
-            global_music_span_masks = torch.stack([mask for rank_masks in gathered_music_span_masks for mask in rank_masks])
+            global_music_span_masks = torch.cat([mask for rank_masks in gathered_music_span_masks for mask in rank_masks], dim=0).to(self.device)
+            global_predicted_spans = torch.cat([span for rank_spans in gathered_predicted_spans for span in rank_spans], dim=0).to(self.device)
+            global_spans_target = torch.cat([span for rank_spans in gathered_spans_target for span in rank_spans], dim=0).to(self.device)
         else:
             global_video_features = local_video_features.to(self.device)
             global_video_masks = local_video_masks.to(self.device)
@@ -335,6 +380,8 @@ class MaDETrainer(Driver):
             global_music_masks = local_music_masks.to(self.device)
             global_music_span_masks = local_music_span_masks.to(self.device)
             global_music_ids = all_music_ids
+            global_predicted_spans = local_predicted_spans.to(self.device)
+            global_spans_target = local_spans_target.to(self.device)
 
         unwrapped_model = unwrap(self.model)
         loss_fn = unwrapped_model.loss_fn
@@ -343,15 +390,17 @@ class MaDETrainer(Driver):
             similarity_matrix_sum = None
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 video_emb = video_aggregator(global_video_features, global_video_masks)
-                video_emb = F.normalize(video_emb, p=2, dim=-1)
 
                 if isinstance(music_aggregator, XPoolAggregator):
-                    music_emb = music_aggregator(video_emb, global_music_features, global_music_masks, global_music_span_masks)
-                    music_emb = F.normalize(music_emb, p=2, dim=-1)
+                    music_emb, _ = music_aggregator(
+                        video_emb,
+                        global_music_features,
+                        global_music_masks,
+                        global_music_span_masks,
+                    )
                     sim = torch.einsum("vmd,vd->vm", music_emb, video_emb)
                 else:
                     music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
-                    music_emb = F.normalize(music_emb, p=2, dim=-1)
                     sim = torch.matmul(video_emb, music_emb.T)
                 
 
@@ -365,9 +414,14 @@ class MaDETrainer(Driver):
             sim_matrix_np = torch.matmul(global_video_features, global_music_features.T).detach().cpu().numpy()
 
         retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
+        miou = calculate_miou(global_predicted_spans, global_spans_target, dataloader.dataset.max_music_duration)
+
 
         metrics = {
             "validation_loss": average_loss,
+            "validation_contrastive_loss": total_validation_contrastive_loss / num_validation_batches,
+            "validation_distribution_loss": total_validation_distribution_loss / num_validation_batches,
+            "validation_miou": miou,
         }
         metrics.update({f"validation_{key}": float(value) for key, value in retrieval.items() if isinstance(value, (int, float, np.floating))})
 
@@ -381,10 +435,13 @@ class MaDETrainer(Driver):
                 + ", ".join(
                     [
                         f"loss={metrics['validation_loss']:.4f}",
+                        f"contrastive={metrics['validation_contrastive_loss']:.4f}",
+                        f"distribution={metrics['validation_distribution_loss']:.4f}",
                         f"R1={metrics.get('validation_R1', float('nan')):.2f}",
                         f"R5={metrics.get('validation_R5', float('nan')):.2f}",
                         f"R10={metrics.get('validation_R10', float('nan')):.2f}",
                         f"MRR={metrics.get('validation_MRR', float('nan')):.4f}",
+                        f"mIoU={metrics.get('validation_miou', float('nan')):.4f}",
                     ]
                 )
             )
@@ -425,14 +482,26 @@ class MaDETrainer(Driver):
             self.epoch += 1
 
             training_loss = training_metrics["training_loss"]
+            training_contrastive_loss = training_metrics.get("training_contrastive_loss", float("nan"))
+            training_distribution_loss = training_metrics.get("training_distribution_loss", float("nan"))
             validation_loss = validation_metrics["validation_loss"]
+            validation_contrastive_loss = validation_metrics.get("validation_contrastive_loss", float("nan"))
+            validation_distribution_loss = validation_metrics.get("validation_distribution_loss", float("nan"))
 
             if self.epoch % checkpoint_config.epoch.every == 0:
                 path = checkpoint_config.epoch.path
                 path = path.format(epoch=self.epoch)
                 self.save_checkpoint(path)
 
-            self.logger.info(f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}, validation_loss={validation_loss:.4f}")
+            self.logger.info(
+                f"[Epoch {self.epoch}]: "
+                f"training_loss={training_loss:.4f}, "
+                f"training_contrastive_loss={training_contrastive_loss:.4f}, "
+                f"training_distribution_loss={training_distribution_loss:.4f}, "
+                f"validation_loss={validation_loss:.4f}, "
+                f"validation_contrastive_loss={validation_contrastive_loss:.4f}, "
+                f"validation_distribution_loss={validation_distribution_loss:.4f}"
+            )
 
             if validation_metrics["validation_loss"] < self.best_validation_loss:
                 self.best_validation_loss = validation_metrics["validation_loss"]
@@ -445,13 +514,20 @@ class MaDETrainer(Driver):
             self.epoch += 1
 
             training_loss = training_metrics["training_loss"]
+            training_contrastive_loss = training_metrics.get("training_contrastive_loss", float("nan"))
+            training_distribution_loss = training_metrics.get("training_distribution_loss", float("nan"))
 
             if self.epoch % checkpoint_config.epoch.every == 0:
                 path = checkpoint_config.epoch.path
                 path = path.format(epoch=self.epoch)
                 self.save_checkpoint(path)
 
-            self.logger.info(f"[Epoch {self.epoch}]: training_loss={training_loss:.4f}")
+            self.logger.info(
+                f"[Epoch {self.epoch}]: "
+                f"training_loss={training_loss:.4f}, "
+                f"training_contrastive_loss={training_contrastive_loss:.4f}, "
+                f"training_distribution_loss={training_distribution_loss:.4f}"
+            )
 
             validation_metrics = {}
 

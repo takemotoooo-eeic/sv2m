@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from sv2m.models.made import MaDE
-from sv2m.criterion import retrieval_metrics
+from sv2m.criterion import retrieval_metrics, calculate_miou
 from sv2m.modules.aggregater import XPoolAggregator
 
 from ...distributed import unwrap
@@ -127,6 +127,8 @@ class MaDEEvaluator(Driver):
         all_music_features = []
         all_music_masks = []
         all_music_span_masks = []
+        all_spans_target = []
+        all_predicted_spans = []
         all_music_ids: list[str] = []
 
         pbar = tqdm(dataloader, desc="Evaluation", disable=self.rank != 0)
@@ -138,14 +140,16 @@ class MaDEEvaluator(Driver):
                 video_masks = batch["video_masks"].to(self.device)
                 music_masks = batch["music_masks"].to(self.device)
                 music_span_masks = batch["music_span_masks"].to(self.device)
+                spans_target = batch["spans_target"].to(self.device)
                 music_ids = batch["music_id"]
 
-                video_embeddings, video_masks, music_embeddings, music_masks, loss = self.model(
+                video_embeddings, video_masks, music_embeddings, music_masks, loss, predict_spans = self.model(
                     video_feats=video_feats,
                     music_feats=music_feats,
                     video_masks=video_masks,
                     music_masks=music_masks,
                     music_span_masks=music_span_masks,
+                    spans_target=spans_target,
                     music_ids=music_ids,
                     apply_normalization=True,
                 )
@@ -158,6 +162,8 @@ class MaDEEvaluator(Driver):
                 all_music_features.append(music_embeddings.detach().cpu())
                 all_music_masks.append(music_masks.detach().cpu())
                 all_music_span_masks.append(music_span_masks.detach().cpu())
+                all_predicted_spans.append(predict_spans.detach().cpu())
+                all_spans_target.append(spans_target.detach().cpu())
 
                 if isinstance(music_ids, (list, tuple)):
                     all_music_ids.extend([str(x) for x in music_ids])
@@ -180,6 +186,8 @@ class MaDEEvaluator(Driver):
         local_music_features = torch.cat(all_music_features, dim=0)
         local_music_masks = torch.cat(all_music_masks, dim=0)
         local_music_span_masks = torch.cat(all_music_span_masks, dim=0)
+        local_predicted_spans = torch.cat(all_predicted_spans, dim=0)
+        local_spans_target = torch.cat(all_spans_target, dim=0)
 
         if is_distributed_mode():
             world_size = dist.get_world_size()
@@ -190,6 +198,8 @@ class MaDEEvaluator(Driver):
             gathered_music_masks = [None] * world_size
             gathered_music_span_masks = [None] * world_size
             gathered_music_ids = [None] * world_size
+            gathered_predicted_spans = [None] * world_size
+            gathered_spans_target = [None] * world_size
 
             dist.all_gather_object(gathered_video_features, local_video_features)
             dist.all_gather_object(gathered_video_masks, local_video_masks)
@@ -197,6 +207,8 @@ class MaDEEvaluator(Driver):
             dist.all_gather_object(gathered_music_masks, local_music_masks)
             dist.all_gather_object(gathered_music_span_masks, local_music_span_masks)
             dist.all_gather_object(gathered_music_ids, all_music_ids)
+            dist.all_gather_object(gathered_predicted_spans, local_predicted_spans)
+            dist.all_gather_object(gathered_spans_target, local_spans_target)
 
             global_video_features = torch.cat(gathered_video_features, dim=0).to(self.device)
             global_video_masks = torch.cat(gathered_video_masks, dim=0).to(self.device)
@@ -204,6 +216,8 @@ class MaDEEvaluator(Driver):
             global_music_masks = torch.cat(gathered_music_masks, dim=0).to(self.device)
             global_music_span_masks = torch.cat(gathered_music_span_masks, dim=0).to(self.device)
             global_music_ids = [music_id for rank_ids in gathered_music_ids for music_id in rank_ids]
+            global_predicted_spans = torch.cat(gathered_predicted_spans, dim=0).to(self.device)
+            global_spans_target = torch.cat(gathered_spans_target, dim=0).to(self.device)
         else:
             global_video_features = local_video_features.to(self.device)
             global_video_masks = local_video_masks.to(self.device)
@@ -211,6 +225,8 @@ class MaDEEvaluator(Driver):
             global_music_masks = local_music_masks.to(self.device)
             global_music_span_masks = local_music_span_masks.to(self.device)
             global_music_ids = all_music_ids
+            global_predicted_spans = local_predicted_spans.to(self.device)
+            global_spans_target = local_spans_target.to(self.device)
 
         unwrapped_model = unwrap(self.model)
         loss_fn = unwrapped_model.loss_fn
@@ -219,15 +235,12 @@ class MaDEEvaluator(Driver):
             similarity_matrix_sum = None
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 video_emb = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
-                video_emb = F.normalize(video_emb, p=2, dim=-1)
 
                 if isinstance(music_aggregator, XPoolAggregator):
-                    music_emb = music_aggregator(video_emb, global_music_features, global_music_masks)
-                    music_emb = F.normalize(music_emb, p=2, dim=-1)
+                    music_emb, _ = music_aggregator(video_emb, global_music_features, global_music_masks, global_music_span_masks)
                     sim = torch.einsum("vmd,vd->vm", music_emb, video_emb)
                 else:
                     music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
-                    music_emb = F.normalize(music_emb, p=2, dim=-1) 
                     sim = torch.matmul(video_emb, music_emb.T)
 
                 if similarity_matrix_sum is None:
@@ -240,9 +253,11 @@ class MaDEEvaluator(Driver):
             sim_matrix_np = torch.matmul(global_video_features, global_music_features.T).detach().cpu().numpy()
 
         retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
+        miou = calculate_miou(global_predicted_spans, global_spans_target, dataloader.dataset.max_music_duration)
 
         metrics = {
             "evaluation_loss": float(average_loss),
+            "evaluation_miou": float(miou),
         }
         for key, value in retrieval.items():
             if isinstance(value, (int, float)):
@@ -259,6 +274,8 @@ class MaDEEvaluator(Driver):
             value = metrics[key]
             if isinstance(value, (int, float)):
                 if "loss" in key or "MRR" in key:
+                    log_items.append(f"{key}={value:.4f}")
+                elif "miou" in key.lower():
                     log_items.append(f"{key}={value:.4f}")
                 else:
                     log_items.append(f"{key}={value:.2f}")
