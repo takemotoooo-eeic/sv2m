@@ -151,14 +151,6 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_music_span_masks = music_span_masks
             global_spans_target = spans_target
 
-        # Ensure all tensors are on the same device
-        global_music_features = global_music_features.to(device)
-        global_music_masks = global_music_masks.to(device)
-        global_music_span_masks = global_music_span_masks.to(device)
-        global_video_features = global_video_features.to(device)
-        global_video_masks = global_video_masks.to(device)
-        global_spans_target = global_spans_target.to(device)
-
         return (
             global_music_features,
             global_music_masks,
@@ -377,12 +369,12 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
             if isinstance(video_aggregator, XPoolAggregator):
                 raise ValueError("video_aggregator cannot be XPoolAggregator")
-            video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
+            video_embeddings = video_aggregator.to(device)(global_video_features, global_video_masks)  # [batch_size, embed_dim]
 
             if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings, attention_weights = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
+                music_embeddings, attention_weights = music_aggregator.to(device)(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
             else:
-                music_embeddings = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
+                music_embeddings = music_aggregator.to(device)(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
             
             if isinstance(music_aggregator, XPoolAggregator):
                 similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)  # [video_batch_size, music_batch_size]
