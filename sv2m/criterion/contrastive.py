@@ -439,6 +439,9 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             local_similarity_v2m = local_similarity_v2m.masked_fill(local_duplicate_mask_v2m, float("-inf"))
             local_similarity_m2v = local_similarity_m2v.masked_fill(local_duplicate_mask_m2v, float("-inf"))
 
+        if attention_weights is not None and is_distributed:
+            attention_weights = attention_weights[start_index:end_index]
+
         # Compute bidirectional cross-entropy loss
         loss_v2m = F.cross_entropy(local_similarity_v2m, labels, reduction=self.reduction)
         loss_m2v = F.cross_entropy(local_similarity_m2v, labels, reduction=self.reduction)
