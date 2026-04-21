@@ -15,6 +15,7 @@ import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
+import numpy as np
 
 from sv2m.models.made import MaDE
 from sv2m.criterion import retrieval_metrics, calculate_miou, CrossModalLateInteractionLoss
@@ -408,7 +409,7 @@ class MaDETrainer(Driver):
             return torch.cat(sims, dim=0)
 
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
-            similarity_matrix_sum = None
+            similarity_matrixs: list[torch.Tensor] = []
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 video_emb = video_aggregator(global_video_features, global_video_masks)
 
@@ -424,12 +425,9 @@ class MaDETrainer(Driver):
                     music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
                     sim = torch.matmul(video_emb, music_emb.T) / loss_fn.temperature
 
-                if similarity_matrix_sum is None:
-                    similarity_matrix_sum = sim
-                else:
-                    similarity_matrix_sum = similarity_matrix_sum + sim
-
-            sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
+                similarity_matrixs.append(sim)
+            sim_matrix: np.ndarray = torch.stack(similarity_matrixs).sum(dim=0).detach().cpu().numpy()
+            sim_matrixs: list[np.ndarray] = [sim.detach().cpu().numpy() for sim in similarity_matrixs]
 
         elif isinstance(loss_fn, CrossModalLateInteractionLoss):
             late_interaction_chunk_size = self.config.dataloader.evaluate.batch_size
@@ -449,7 +447,8 @@ class MaDETrainer(Driver):
 
                 gathered_local_sims = [None] * dist.get_world_size()
                 dist.all_gather_object(gathered_local_sims, local_sim.detach().cpu())
-                sim_matrix_np = torch.cat(gathered_local_sims, dim=0).numpy()
+                sim_matrix: np.ndarray = torch.cat(gathered_local_sims, dim=0).numpy()
+                sim_matrixs = [sim_matrix]
             else:
                 sim = _compute_late_interaction_sim_chunked(
                     global_video_features,
@@ -459,14 +458,18 @@ class MaDETrainer(Driver):
                     global_music_span_masks,
                     late_interaction_chunk_size,
                 ) / loss_fn.temperature
-                sim_matrix_np = sim.detach().cpu().numpy()
+                sim_matrix: np.ndarray = sim.detach().cpu().numpy()
+                sim_matrixs = [sim_matrix]
         else:
             raise ValueError("Unsupported loss function for retrieval metrics calculation.")
             
 
-        retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
+        retrieval, _, _ = retrieval_metrics(sim_matrix, all_music_ids_list=global_music_ids)
         miou = calculate_miou(global_predicted_spans, global_spans_target, dataloader.dataset.max_music_duration)
-
+        retrievals = []
+        for sim in sim_matrixs:
+            ret, _, _ = retrieval_metrics(sim, all_music_ids_list=global_music_ids)
+            retrievals.append(ret)
 
         metrics = {
             "validation_loss": average_loss,
@@ -475,6 +478,8 @@ class MaDETrainer(Driver):
             "validation_miou": miou,
         }
         metrics.update({f"validation_{key}": float(value) for key, value in retrieval.items() if isinstance(value, (int, float, np.floating))})
+        for idx, ret in enumerate(retrievals):
+            metrics.update({f"validation_{key}_sim{idx}": float(value) for key, value in ret.items() if isinstance(value, (int, float, np.floating))})
 
         for key, value in retrieval.items():
             if isinstance(value, (int, float, np.floating)):
@@ -488,14 +493,45 @@ class MaDETrainer(Driver):
                         f"loss={metrics['validation_loss']:.4f}",
                         f"contrastive={metrics['validation_contrastive_loss']:.4f}",
                         f"distribution={metrics['validation_distribution_loss']:.4f}",
+                    ]
+                )
+            )
+            self.logger.info(
+                "[Validation Retrieval Metrics] "
+                + ", ".join(
+                    [
                         f"R1={metrics.get('validation_R1', float('nan')):.2f}",
+                        f"R3={metrics.get('validation_R3', float('nan')):.2f}",
                         f"R5={metrics.get('validation_R5', float('nan')):.2f}",
                         f"R10={metrics.get('validation_R10', float('nan')):.2f}",
+                        f"R25={metrics.get('validation_R25', float('nan')):.2f}",
+                        f"R50={metrics.get('validation_R50', float('nan')):.2f}",
+                        f"R100={metrics.get('validation_R100', float('nan')):.2f}",
+                        f"MedianR={metrics.get('validation_MedianR', float('nan')):.2f}",
+                        f"MeanR={metrics.get('validation_MeanR', float('nan')):.2f}",
                         f"MRR={metrics.get('validation_MRR', float('nan')):.4f}",
                         f"mIoU={metrics.get('validation_miou', float('nan')):.4f}",
                     ]
                 )
             )
+            for idx in range(len(similarity_matrixs)):
+                self.logger.info(
+                    f"[Validation Retrieval Metrics (sim{idx})] "
+                    + ", ".join(
+                        [
+                            f"R1={metrics.get(f'validation_R1_sim{idx}', float('nan')):.2f}",
+                            f"R3={metrics.get(f'validation_R3_sim{idx}', float('nan')):.2f}",
+                            f"R5={metrics.get(f'validation_R5_sim{idx}', float('nan')):.2f}",
+                            f"R10={metrics.get(f'validation_R10_sim{idx}', float('nan')):.2f}",
+                            f"R25={metrics.get(f'validation_R25_sim{idx}', float('nan')):.2f}",
+                            f"R50={metrics.get(f'validation_R50_sim{idx}', float('nan')):.2f}",
+                            f"R100={metrics.get(f'validation_R100_sim{idx}', float('nan')):.2f}",
+                            f"MedianR={metrics.get(f'validation_MedianR_sim{idx}', float('nan')):.2f}",
+                            f"MeanR={metrics.get(f'validation_MeanR_sim{idx}', float('nan')):.2f}",
+                            f"MRR={metrics.get(f'validation_MRR_sim{idx}', float('nan')):.4f}",
+                        ]
+                    )
+                )
 
         return metrics
 

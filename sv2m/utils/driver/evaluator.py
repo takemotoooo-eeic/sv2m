@@ -9,6 +9,7 @@ import os
 import json
 from typing import Any, Dict, List, Optional, Tuple
 import json
+import numpy as np
 
 import hydra
 import torch
@@ -253,7 +254,7 @@ class MaDEEvaluator(Driver):
             return torch.cat(sims, dim=0)
 
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
-            similarity_matrix_sum = None
+            similarity_matrixs: list[torch.Tensor] = []
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 video_emb = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
 
@@ -264,12 +265,10 @@ class MaDEEvaluator(Driver):
                     music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
                     sim = torch.matmul(video_emb, music_emb.T) / loss_fn.temperature
 
-                if similarity_matrix_sum is None:
-                    similarity_matrix_sum = sim
-                else:
-                    similarity_matrix_sum = similarity_matrix_sum + sim
+                similarity_matrixs.append(sim)
 
-            sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
+            sim_matrix_np = torch.stack(similarity_matrixs).sum(dim=0).detach().cpu().numpy()
+            sim_matrixs: list[np.ndarray] = [sim.detach().cpu().numpy() for sim in similarity_matrixs]
         
         elif isinstance(loss_fn, CrossModalLateInteractionLoss):
             late_interaction_chunk_size = self.config.dataloader.evaluate.batch_size
@@ -290,6 +289,7 @@ class MaDEEvaluator(Driver):
                 gathered_local_sims = [None] * dist.get_world_size()
                 dist.all_gather_object(gathered_local_sims, local_sim.detach().cpu())
                 sim_matrix_np = torch.cat(gathered_local_sims, dim=0).numpy()
+                sim_matrixs = [sim_matrix_np]
             else:
                 sim = _compute_late_interaction_sim_chunked(
                     global_video_features,
@@ -300,10 +300,15 @@ class MaDEEvaluator(Driver):
                     late_interaction_chunk_size,
                 ) / loss_fn.temperature
                 sim_matrix_np = sim.detach().cpu().numpy()
+                sim_matrixs = [sim_matrix_np]
         else:
             raise ValueError("Unsupported loss function for retrieval metrics calculation.")
 
         retrieval, _, _ = retrieval_metrics(sim_matrix_np, all_music_ids_list=global_music_ids)
+        retrievals = []
+        for sim in sim_matrixs:
+            ret, _, _ = retrieval_metrics(sim, all_music_ids_list=global_music_ids)
+            retrievals.append(ret)
         miou = calculate_miou(global_predicted_spans, global_spans_target, dataloader.dataset.max_music_duration)
 
         metrics = {
@@ -311,8 +316,13 @@ class MaDEEvaluator(Driver):
             "evaluation_miou": float(miou),
         }
         for key, value in retrieval.items():
-            if isinstance(value, (int, float)):
+            if isinstance(value, (int, float, np.floating)):
                 metrics[f"evaluation_{key}"] = float(value)
+
+        for idx, ret in enumerate(retrievals):
+            for key, value in ret.items():
+                if isinstance(value, (int, float, np.floating)):
+                    metrics[f"evaluation_{key}_sim{idx}"] = float(value)
 
         return metrics
 
@@ -361,198 +371,6 @@ class MaDEEvaluator(Driver):
 
         if self.writer is not None:
             self.writer.close()
-
-        return metrics
-
-    def extract_all_embeddings(
-        self,
-        dataloader: DataLoader,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract all video and music embeddings from dataset.
-
-        Note:
-            - This method assumes batch_size=1 with multiple per sample
-            - Each sample's chunks are averaged to produce a single embedding per song
-            - The dataloader must have shuffle=False to maintain paired data alignment
-
-        Args:
-            dataloader (DataLoader): Evaluation data loader with batch_size=1.
-
-        Returns:
-            tuple: Tuple of tensors containing:
-                - torch.Tensor: Video embeddings of shape (num_samples, embedding_dim).
-                - torch.Tensor: Music embeddings of shape (num_samples, embedding_dim).
-
-        """
-        batched_video_embeddings = []
-        batched_music_embeddings = []
-
-        self.model.eval()
-
-        pbar = tqdm(dataloader, desc="Extracting embeddings")
-
-        collected_keys = set()
-
-        with torch.no_grad():
-            for batch in pbar:
-                collected_keys.add(batch["__key__"])
-                video_input = batch["video"]
-                music_input = batch["audio"]
-
-                video_input = video_input.to(self.device)
-                music_input = music_input.to(self.device)
-
-                video_embeddings = self.model.video_encoder(video_input)
-                music_embeddings = self.model.music_encoder(music_input)
-
-                video_embeddings = F.normalize(video_embeddings, p=2, dim=-1)
-                music_embeddings = F.normalize(music_embeddings, p=2, dim=-1)
-
-                video_embedding = video_embeddings.mean(dim=0)
-                music_embedding = music_embeddings.mean(dim=0)
-
-                # re-normalize
-                video_embedding = F.normalize(video_embedding, p=2, dim=-1)
-                music_embedding = F.normalize(music_embedding, p=2, dim=-1)
-
-                batched_video_embeddings.append(video_embedding.cpu())
-                batched_music_embeddings.append(music_embedding.cpu())
-
-        batched_video_embeddings = torch.stack(batched_video_embeddings, dim=0)
-        batched_music_embeddings = torch.stack(batched_music_embeddings, dim=0)
-
-        if len(collected_keys) != batched_video_embeddings.size(0):
-            self.logger.warning(
-                "There seem to be duplicates in samples. "
-                f"Unique keys: {len(collected_keys)}, "
-                f"Embeddings: {batched_video_embeddings.size(0)}"
-            )
-
-        return batched_video_embeddings, batched_music_embeddings
-
-    def compute_batched_retrieval_metrics(
-        self,
-        query_embeddings: torch.Tensor,
-        target_embeddings: torch.Tensor,
-        query_batch_size: int = 1000,
-        metrics_config: List = None,
-    ) -> Dict[str, float]:
-        """Compute retrieval metrics with batched similarity computation.
-
-        This method avoids materializing the full similarity matrix by processing
-        queries in batches, significantly reducing memory requirements.
-
-        Args:
-            query_embeddings (torch.Tensor): Query embeddings of shape (batch_size, embedding_dim).
-            target_embeddings (torch.Tensor): Target embeddings of shape (batch_size, embedding_dim).
-            query_batch_size (int): Number of queries to process at once for similarity computation. Default: 1000.
-            metrics_config (List): List of metrics to compute. Can contain:
-                - str: metric name (e.g., "median_rank", "mrr")
-                - dict: metric with parameters (e.g., {"map_at_k": [10, 50, 100]}, {"recall_at_k": [1, 5, 10]})
-                Default: [{"map_at_k": [1, 5, 10]}, {"recall_at_k": [1, 5, 10]}, "median_rank", "mrr"]
-
-        Returns:
-            Dict[str, float]: Dictionary containing requested metrics.
-
-        """  # noqa: E501
-        if metrics_config is None:
-            metrics_config = [
-                {"map_at_k": [1, 5, 10]},
-                {"recall_at_k": [1, 5, 10]},
-                "median_rank",
-                "mrr",
-            ]
-        elif isinstance(metrics_config, ListConfig):
-            metrics_config = OmegaConf.to_container(metrics_config, resolve=True)
-        elif isinstance(metrics_config, list):
-            pass
-        else:
-            raise TypeError(f"{type(metrics_config)} is not supported as metrics config.")
-
-        recall_k_values = []
-        map_k_values = []
-        compute_median_rank = False
-        compute_mrr = False
-
-        for metric in metrics_config:
-            if isinstance(metric, dict):
-                if "recall_at_k" in metric:
-                    recall_k_values = metric["recall_at_k"]
-                elif "map_at_k" in metric:
-                    map_k_values = metric["map_at_k"]
-                else:
-                    raise ValueError(f"Unsupported metric configuration: {metric}")
-            elif isinstance(metric, str):
-                if metric == "median_rank":
-                    compute_median_rank = True
-                elif metric == "mrr":
-                    compute_mrr = True
-                else:
-                    raise ValueError(f"Unsupported metric: {metric}")
-            else:
-                raise ValueError(f"Unsupported metric type: {type(metric)}, value: {metric}")
-
-        num_queries = query_embeddings.size(0)
-        device = self.device
-
-        ranks = []
-        average_precisions_at_k = {k: [] for k in map_k_values} if map_k_values else {}
-        recall_at_k = {k: 0 for k in recall_k_values} if recall_k_values else {}
-        reciprocal_ranks = [] if compute_mrr else None
-
-        target_embeddings = target_embeddings.to(device)
-
-        query_batch_size = min(query_batch_size, num_queries)
-
-        for start_index in tqdm(
-            range(0, num_queries, query_batch_size), desc="Computing similarities", leave=False
-        ):
-            end_index = min(start_index + query_batch_size, num_queries)
-            _query_embeddings = query_embeddings[start_index:end_index].to(device)
-            similarities = F.cosine_similarity(
-                _query_embeddings.unsqueeze(dim=-2), target_embeddings, dim=-1
-            )
-
-            for local_index in range(similarities.size(0)):
-                global_index = start_index + local_index
-                _similarities = similarities[local_index]
-
-                # Ground truth: query i matches target i (paired data assumption)
-                target_score = _similarities[global_index]
-
-                rank = torch.sum(_similarities > target_score).item()
-                rank = rank + 1
-                ranks.append(rank)
-
-                if map_k_values:
-                    for k in map_k_values:
-                        # If ground truth is within top k, AP@k = 1/rank, otherwise AP@k = 0
-                        ap_at_k = 1.0 / rank if rank <= k else 0.0
-                        average_precisions_at_k[k].append(ap_at_k)
-
-                if recall_k_values:
-                    for k in recall_k_values:
-                        if rank <= k:
-                            recall_at_k[k] += 1
-
-                if compute_mrr:
-                    reciprocal_ranks.append(1.0 / rank)
-
-        metrics = {}
-
-        if map_k_values:
-            for k in map_k_values:
-                metrics[f"map@{k}"] = sum(average_precisions_at_k[k]) / num_queries
-
-        if recall_k_values:
-            for k in recall_k_values:
-                metrics[f"recall@{k}"] = recall_at_k[k] / num_queries
-
-        if compute_median_rank:
-            metrics["median_rank"] = float(torch.tensor(ranks, dtype=torch.float32).median())
-
-        if compute_mrr:
-            metrics["mrr"] = sum(reciprocal_ranks) / num_queries
 
         return metrics
     
