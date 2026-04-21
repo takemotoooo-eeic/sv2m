@@ -505,7 +505,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         similarity = torch.einsum("avd,bmd->abvm", video_features, music_features)  # [B_v, B_m, T_v, T_m]
 
         music_masks = music_masks.to(dtype=torch.bool)
-        if self.use_span_mask and music_span_masks is not None:
+        if aggregator.use_span_mask and music_span_masks is not None:
             similarity = similarity.masked_fill(~music_span_masks[None, :, None, :], float("-inf"))
         else:
             similarity = similarity.masked_fill(~music_masks[None, :, None, :], float("-inf"))
