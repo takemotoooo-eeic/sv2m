@@ -24,7 +24,7 @@ class MGSVECLoader:
         shuffle: bool = False,
         num_workers: int = 0,
         drop_last: bool = False,
-        pin_memory: bool = False,
+        pin_memory: bool = True,
         sampler: Any = None,
         **kwargs,
     ) -> None:

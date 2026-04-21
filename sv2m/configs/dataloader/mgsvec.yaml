@@ -16,6 +16,7 @@ train:
     length: 49194
     crop_music_feat: false
   batch_size: 512
+  num_workers: 64
   shuffle: true
   drop_last: true
 
@@ -33,8 +34,9 @@ validate:
     crop_music_feat: ${...train.dataset.crop_music_feat}
     length: 2000
   batch_size: 64
+  num_workers: 64
   shuffle: false
-  drop_last: true
+  drop_last: false
 
 evaluate:
   _target_: ${..train._target_}
@@ -50,5 +52,6 @@ evaluate:
     crop_music_feat: ${...train.dataset.crop_music_feat}
     length: 2000
   batch_size: 64
+  num_workers: 64
   shuffle: false
   drop_last: false
