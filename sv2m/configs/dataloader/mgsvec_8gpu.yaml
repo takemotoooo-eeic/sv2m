@@ -1,0 +1,15 @@
+defaults:
+  - mgsvec
+  - _self_
+
+train:
+  batch_size: 64
+  num_workers: 8
+
+validate:
+  batch_size: 8
+  num_workers: 8
+
+evaluate:
+  batch_size: 8
+  num_workers: 8
