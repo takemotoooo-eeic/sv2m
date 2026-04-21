@@ -13,5 +13,5 @@ loss_fn:
       use_span_mask: false
   music_aggregators:
     - _target_: sv2m.modules.aggregater.LateInteractionAggregator
-      aggregation: ${video_aggregators.0.aggregation}
-      use_span_mask: ${video_aggregators.0.use_span_mask}
+      aggregation: "max"
+      use_span_mask: false

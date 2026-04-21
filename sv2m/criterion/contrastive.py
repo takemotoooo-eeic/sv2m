@@ -390,6 +390,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
                 # Compute late-interaction similarity matrix
                 similarity_matrix = self.compute_late_interaction_similarity_matrix(
+                    aggregator=video_aggregator,
                     video_features=global_video_features,
                     music_features=global_music_features,
                     video_masks=global_video_masks,
@@ -467,6 +468,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
 
     def compute_late_interaction_similarity_matrix(
         self,
+        aggregator: LateInteractionAggregator,
         video_features: torch.Tensor,
         music_features: torch.Tensor,
         video_masks: Optional[torch.Tensor] = None,
@@ -490,6 +492,7 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
                 Valid-token mask for videos with shape [B_v, T_v]. True means valid.
             music_masks (Optional[torch.Tensor]):
                 Valid-token mask for music with shape [B_m, T_m]. True means valid.
+            
 
         Returns:
             torch.Tensor:
@@ -508,15 +511,15 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             similarity = similarity.masked_fill(~music_masks[None, :, None, :], float("-inf"))
 
         # For each video token, keep the best matching music token: [B_v, B_m, T_v]
-        if self.aggregation == "max":
+        if aggregator.aggregation == "max":
             token_scores = similarity.max(dim=-1).values
-        elif self.aggregation == "log_sum":
-            token_scores = torch.logsumexp(similarity / self.aggregation_temperature, dim=-1) * self.aggregation_temperature
-        elif self.aggregation == "top_k":
-            top_k = min(self.top_k, similarity.size(-1))
+        elif aggregator.aggregation == "log_sum":
+            token_scores = torch.logsumexp(similarity / aggregator.aggregation_temperature, dim=-1) * aggregator.aggregation_temperature
+        elif aggregator.aggregation == "top_k":
+            top_k = min(aggregator.top_k, similarity.size(-1))
             token_scores = similarity.topk(k=top_k, dim=-1).values.mean(dim=-1)
         else:
-            raise ValueError(f"Invalid aggregation method: {self.aggregation}")
+            raise ValueError(f"Invalid aggregation method: {aggregator.aggregation}")
 
         video_masks = video_masks.to(dtype=torch.bool)
         token_scores = token_scores.masked_fill(~video_masks[:, None, :], 0.0)

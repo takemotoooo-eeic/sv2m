@@ -232,6 +232,7 @@ class MaDEEvaluator(Driver):
         loss_fn = unwrapped_model.loss_fn
 
         def _compute_late_interaction_sim_chunked(
+            aggregator: LateInteractionAggregator,
             video_features: torch.Tensor,
             music_features: torch.Tensor,
             video_masks: torch.Tensor,
@@ -243,32 +244,34 @@ class MaDEEvaluator(Driver):
             for start in range(0, video_features.size(0), chunk_size):
                 end = min(start + chunk_size, video_features.size(0))
                 chunk_sim = loss_fn.compute_late_interaction_similarity_matrix(
-                    video_features[start:end],
-                    music_features,
-                    video_masks[start:end],
-                    music_masks,
-                    music_span_masks,
+                    aggregator=aggregator,
+                    video_features=video_features[start:end],
+                    music_features=music_features,
+                    video_masks=video_masks[start:end],
+                    music_masks=music_masks,
+                    music_span_masks=music_span_masks,
                 )
                 sims.append(chunk_sim)
             return torch.cat(sims, dim=0)
 
+        chunk_size = self.config.dataloader.evaluate.batch_size
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
             similarity_matrixs: list[torch.Tensor] = []
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
                 if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
-                    late_interaction_chunk_size = self.config.dataloader.evaluate.batch_size
 
                     if is_distributed_mode():
                         local_video_features_on_device = local_video_features.to(self.device)
                         local_video_masks_on_device = local_video_masks.to(self.device)
 
                         local_sim = _compute_late_interaction_sim_chunked(
-                            local_video_features_on_device,
-                            global_music_features,
-                            local_video_masks_on_device,
-                            global_music_masks,
-                            global_music_span_masks,
-                            late_interaction_chunk_size,
+                            aggregator=video_aggregator,
+                            video_features=local_video_features_on_device,
+                            music_features=global_music_features,
+                            video_masks=local_video_masks_on_device,
+                            music_masks=global_music_masks,
+                            music_span_masks=global_music_span_masks,
+                            chunk_size=chunk_size,
                         ) / loss_fn.temperature
 
                         gathered_local_sims = [None] * dist.get_world_size()
@@ -276,12 +279,13 @@ class MaDEEvaluator(Driver):
                         sim = torch.cat(gathered_local_sims, dim=0).to(self.device)
                     else:
                         sim = _compute_late_interaction_sim_chunked(
-                            global_video_features,
-                            global_music_features,
-                            global_video_masks,
-                            global_music_masks,
-                            global_music_span_masks,
-                            late_interaction_chunk_size,
+                            aggregator=video_aggregator,
+                            video_features=global_video_features,
+                            music_features=global_music_features,
+                            video_masks=global_video_masks,
+                            music_masks=global_music_masks,
+                            music_span_masks=global_music_span_masks,
+                            chunk_size=chunk_size,
                         ) / loss_fn.temperature
 
                     similarity_matrixs.append(sim)
