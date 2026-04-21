@@ -151,6 +151,14 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
             global_music_span_masks = music_span_masks
             global_spans_target = spans_target
 
+        # Ensure all tensors are on the same device
+        global_music_features = global_music_features.to(device)
+        global_music_masks = global_music_masks.to(device)
+        global_music_span_masks = global_music_span_masks.to(device)
+        global_video_features = global_video_features.to(device)
+        global_video_masks = global_video_masks.to(device)
+        global_spans_target = global_spans_target.to(device)
+
         return (
             global_music_features,
             global_music_masks,
