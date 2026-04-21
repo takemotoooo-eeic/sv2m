@@ -234,13 +234,13 @@ class MaDEEvaluator(Driver):
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
             similarity_matrix_sum = None
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
-                video_emb = video_aggregator.to(self.device)(global_video_features, global_video_masks)  # [batch_size, embed_dim]
+                video_emb = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
 
                 if isinstance(music_aggregator, XPoolAggregator):
-                    music_emb, _ = music_aggregator.to(self.device)(video_emb, global_music_features, global_music_masks, global_music_span_masks)
+                    music_emb, _ = music_aggregator(video_emb, global_music_features, global_music_masks, global_music_span_masks)
                     sim = torch.einsum("vmd,vd->vm", music_emb, video_emb) / loss_fn.temperature
                 else:
-                    music_emb = music_aggregator.to(self.device)(global_music_features, global_music_masks, global_music_span_masks)
+                    music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
                     sim = torch.matmul(video_emb, music_emb.T) / loss_fn.temperature
 
                 if similarity_matrix_sum is None:

@@ -47,8 +47,8 @@ class _CrossModalContrastiveLoss(nn.Module, ABC):
 
         self.log_temperature = nn.Parameter(torch.log(torch.tensor(temperature)))
         self.min_temperature = min_temperature
-        self.video_aggregators = video_aggregators
-        self.music_aggregators = music_aggregators
+        self.video_aggregators = nn.ModuleList(video_aggregators or [])
+        self.music_aggregators = nn.ModuleList(music_aggregators or [])
         self.distribution_loss = distribution_loss
         self.reduction = reduction
         self.delete_duplicate = delete_duplicate
