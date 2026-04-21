@@ -60,7 +60,7 @@ loss_fn:
     - _target_: sv2m.modules.aggregater.AverageAggregator
       insert_cls_token: false
       insert_dist_token: false
-      use_span_mask: false  
+      use_span_mask: true   
     - _target_: sv2m.modules.aggregater.XPoolAggregator
       insert_cls_token: false
       insert_dist_token: false
@@ -78,4 +78,3 @@ loss_fn:
     window_shape: "uniform"
     apply_negative_sample: false
     weight: 1.0
-    
