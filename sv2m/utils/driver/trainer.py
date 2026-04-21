@@ -388,81 +388,35 @@ class MaDETrainer(Driver):
         unwrapped_model = unwrap(self.model)
         loss_fn = unwrapped_model.loss_fn
 
-        def _compute_late_interaction_sim_chunked(
-            aggregator: LateInteractionAggregator,
-            video_features: torch.Tensor,
-            music_features: torch.Tensor,
-            video_masks: torch.Tensor,
-            music_masks: torch.Tensor,
-            music_span_masks: torch.Tensor,
-            chunk_size: int,
-        ) -> torch.Tensor:
-            sims = []
-            for start in range(0, video_features.size(0), chunk_size):
-                end = min(start + chunk_size, video_features.size(0))
-                chunk_sim = loss_fn.compute_late_interaction_similarity_matrix(
-                    aggregator=aggregator,
-                    video_features=video_features[start:end],
-                    music_features=music_features,
-                    video_masks=video_masks[start:end],
-                    music_masks=music_masks,
-                    music_span_masks=music_span_masks,
-                )
-                sims.append(chunk_sim)
-            return torch.cat(sims, dim=0)
-        
         chunk_size = self.config.dataloader.evaluate.batch_size
 
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
-            similarity_matrixs: list[torch.Tensor] = []
-            for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
-                if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
-                    if is_distributed_mode():
-                        local_video_features_on_device = local_video_features.to(self.device)
-                        local_video_masks_on_device = local_video_masks.to(self.device)
+            if is_distributed_mode():
+                local_similarity_matrixs, _ = loss_fn.compute_similarity_matrixs(
+                    video_features=local_video_features.to(self.device),
+                    music_features=global_music_features,
+                    video_masks=local_video_masks.to(self.device),
+                    music_masks=global_music_masks,
+                    music_span_masks=global_music_span_masks,
+                )
 
-                        local_sim = _compute_late_interaction_sim_chunked(
-                            aggregator=video_aggregator,
-                            video_features=local_video_features_on_device,
-                            music_features=global_music_features,
-                            video_masks=local_video_masks_on_device,
-                            music_masks=global_music_masks,
-                            music_span_masks=global_music_span_masks,
-                            chunk_size=chunk_size,
-                        ) / loss_fn.temperature
-
-                        gathered_local_sims = [None] * dist.get_world_size()
-                        dist.all_gather_object(gathered_local_sims, local_sim.detach().cpu())
-                        sim = torch.cat(gathered_local_sims, dim=0).to(self.device)
-                    else:
-                        sim = _compute_late_interaction_sim_chunked(
-                            aggregator=video_aggregator,
-                            video_features=global_video_features,
-                            music_features=global_music_features,
-                            video_masks=global_video_masks,
-                            music_masks=global_music_masks,
-                            music_span_masks=global_music_span_masks,
-                            chunk_size=chunk_size,
-                        ) / loss_fn.temperature
-
+                similarity_matrixs = []
+                for local_sim in local_similarity_matrixs:
+                    gathered_local_sims = [None] * dist.get_world_size()
+                    dist.all_gather_object(gathered_local_sims, local_sim.detach().cpu())
+                    sim = torch.cat(gathered_local_sims, dim=0).to(self.device) / loss_fn.temperature
                     similarity_matrixs.append(sim)
-                    continue
+            else:
+                similarity_matrixs, _ = loss_fn.compute_similarity_matrixs(
+                    video_features=global_video_features,
+                    music_features=global_music_features,
+                    video_masks=global_video_masks,
+                    music_masks=global_music_masks,
+                    music_span_masks=global_music_span_masks,
+                    chunk_size=chunk_size,
+                )
+                similarity_matrixs = [sim / loss_fn.temperature for sim in similarity_matrixs]
 
-                video_emb = video_aggregator(global_video_features, global_video_masks)
-
-                if isinstance(music_aggregator, XPoolAggregator):
-                    music_emb, _ = music_aggregator(
-                        video_emb,
-                        global_music_features,
-                        global_music_masks,
-                        global_music_span_masks,
-                    )
-                    sim = torch.einsum("vmd,vd->vm", music_emb, video_emb) / loss_fn.temperature
-                else:
-                    music_emb = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)
-                    sim = torch.matmul(video_emb, music_emb.T) / loss_fn.temperature
-
-                similarity_matrixs.append(sim)
             sim_matrix: np.ndarray = torch.stack(similarity_matrixs).sum(dim=0).detach().cpu().numpy()
             sim_matrixs: list[np.ndarray] = [sim.detach().cpu().numpy() for sim in similarity_matrixs]
         else:

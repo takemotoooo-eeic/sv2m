@@ -344,6 +344,104 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             if not has_xpool:
                 raise ValueError("distribution_loss requires at least one XPoolAggregator in music_aggregators")
 
+    def compute_similarity_matrixs(
+        self,
+        video_features: torch.Tensor,
+        music_features: torch.Tensor,
+        video_masks: torch.Tensor,
+        music_masks: torch.Tensor,
+        music_span_masks: Optional[torch.Tensor],
+        chunk_size: Optional[int] = None,
+    ) -> Tuple[list[torch.Tensor], Optional[torch.Tensor]]:
+        """Compute per-aggregator similarity matrices from features and masks.
+
+        Args:
+            video_features: Video features with shape [Bv, ...].
+            music_features: Music features with shape [Bm, ...].
+            video_masks: Video masks with shape [Bv, ...].
+            music_masks: Music masks with shape [Bm, ...].
+            music_span_masks: Optional music span masks with shape [Bm, ...].
+            chunk_size: Optional chunk size used for late-interaction aggregators.
+
+        Returns:
+            Tuple of (similarity_matrixs, attention_weights). ``attention_weights``
+            is returned when an ``XPoolAggregator`` is used.
+        """
+        if len(self.video_aggregators) != len(self.music_aggregators):
+            raise ValueError("video_aggregators and music_aggregators must have same length")
+        if len(self.video_aggregators) == 0:
+            raise ValueError("at least one aggregator is required")
+
+        similarity_matrixs: list[torch.Tensor] = []
+        attention_weights = None
+
+        for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
+            if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
+                if chunk_size is None:
+                    similarity_matrix = self.compute_late_interaction_similarity_matrix(
+                        aggregator=video_aggregator,
+                        video_features=video_features,
+                        music_features=music_features,
+                        video_masks=video_masks,
+                        music_masks=music_masks,
+                        music_span_masks=music_span_masks,
+                    )
+                else:
+                    chunked_similarity_matrixs = []
+                    for start in range(0, video_features.size(0), chunk_size):
+                        end = min(start + chunk_size, video_features.size(0))
+                        chunked_similarity_matrixs.append(
+                            self.compute_late_interaction_similarity_matrix(
+                                aggregator=video_aggregator,
+                                video_features=video_features[start:end],
+                                music_features=music_features,
+                                video_masks=video_masks[start:end],
+                                music_masks=music_masks,
+                                music_span_masks=music_span_masks,
+                            )
+                        )
+                    similarity_matrix = torch.cat(chunked_similarity_matrixs, dim=0)
+
+                similarity_matrixs.append(similarity_matrix)
+                continue
+
+            if isinstance(music_aggregator, XPoolAggregator):
+                # XPoolAggregator requires video_embeddings, so compute them first
+                if chunk_size is None:
+                    video_embeddings = video_aggregator(video_features, video_masks)
+                    music_embeddings, attention_weights = music_aggregator(
+                        video_embeddings,
+                        music_features,
+                        music_masks,
+                        music_span_masks,
+                    )
+                    similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)
+                else:
+                    chunked_similarity_matrixs = []
+                    chunked_attention_weights = []
+                    for start in range(0, video_features.size(0), chunk_size):
+                        end = min(start + chunk_size, video_features.size(0))
+                        chunk_video_embeddings = video_aggregator(video_features[start:end], video_masks[start:end])
+                        chunk_music_embeddings, chunk_attention_weights = music_aggregator(
+                            chunk_video_embeddings,
+                            music_features,
+                            music_masks,
+                            music_span_masks,
+                        )
+                        chunk_similarity_matrix = torch.einsum("vmd,vd->vm", chunk_music_embeddings, chunk_video_embeddings)
+                        chunked_similarity_matrixs.append(chunk_similarity_matrix)
+                        chunked_attention_weights.append(chunk_attention_weights)
+                    similarity_matrix = torch.cat(chunked_similarity_matrixs, dim=0)
+                    attention_weights = torch.cat(chunked_attention_weights, dim=0)
+            else:
+                video_embeddings = video_aggregator(video_features, video_masks)
+                music_embeddings = music_aggregator(music_features, music_masks, music_span_masks)
+                similarity_matrix = torch.matmul(video_embeddings, music_embeddings.T)
+
+            similarity_matrixs.append(similarity_matrix)
+
+        return similarity_matrixs, attention_weights
+
     def forward(
         self,
         music_features: torch.Tensor,
@@ -384,32 +482,13 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             device,
         ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids, spans_target)
 
-        similarity_matrixs = []
-        attention_weights = None
-
-        for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
-            if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
-                # Compute late-interaction similarity matrix
-                similarity_matrix = self.compute_late_interaction_similarity_matrix(
-                    aggregator=video_aggregator,
-                    video_features=global_video_features,
-                    music_features=global_music_features,
-                    video_masks=global_video_masks,
-                    music_masks=global_music_masks,
-                    music_span_masks=global_music_span_masks,
-                )
-                similarity_matrixs.append(similarity_matrix)
-                continue
-            
-            video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
-
-            if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings, attention_weights = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
-                similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)  # [video_batch_size, music_batch_size]
-            else:
-                music_embeddings = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
-                similarity_matrix = torch.matmul(video_embeddings, music_embeddings.T)  # [video_batch_size, music_batch_size]    
-            similarity_matrixs.append(similarity_matrix)
+        similarity_matrixs, attention_weights = self.compute_similarity_matrixs(
+            video_features=global_video_features,
+            music_features=global_music_features,
+            video_masks=global_video_masks,
+            music_masks=global_music_masks,
+            music_span_masks=global_music_span_masks,
+        )
         similarity_matrix = torch.mean(torch.stack(similarity_matrixs), dim=0) / self.temperature
         
 
