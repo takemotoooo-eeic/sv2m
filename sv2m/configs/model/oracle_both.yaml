@@ -1,0 +1,17 @@
+defaults:
+  - baseline
+  - _self_
+
+loss_fn:
+  music_aggregators:
+    - _target_: sv2m.modules.aggregater.AverageAggregator
+      insert_cls_token: false
+      insert_dist_token: false
+      use_span_mask: true
+    - _target_: sv2m.modules.aggregater.XPoolAggregator
+      insert_cls_token: false
+      insert_dist_token: false
+      dim_input: ${....music_encoder.projector.out_features}
+      num_heads: 1
+      dropout: 0.3
+      use_span_mask: true

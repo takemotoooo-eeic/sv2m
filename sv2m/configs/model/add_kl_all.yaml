@@ -1,0 +1,12 @@
+defaults:
+  - baseline
+  - _self_
+
+loss_fn:
+  distribution_loss:
+    _target_: sv2m.criterion.KLDivLoss
+    music_max_duration: ${dataloader.train.dataset.music_max_duration}
+    stride: ${dataloader.train.dataset.stride}
+    window_shape: "uniform"
+    apply_negative_sample: true
+    weight: 1.0

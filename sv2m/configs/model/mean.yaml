@@ -1,0 +1,16 @@
+defaults:
+  - baseline
+  - _self_
+
+loss_fn:
+  video_aggregators:
+    - _target_: sv2m.modules.aggregater.AverageAggregator
+      insert_cls_token: false
+      insert_dist_token: false
+      use_span_mask: false
+  music_aggregators:
+    - _target_: sv2m.modules.aggregater.AverageAggregator
+      insert_cls_token: false
+      insert_dist_token: false
+      use_span_mask: false
+  

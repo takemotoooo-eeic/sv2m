@@ -1,0 +1,17 @@
+defaults:
+  - baseline
+  - _self_
+
+loss_fn:
+  _delete_: true
+  _target_: sv2m.criterion.CrossModalInfoNCELoss
+  temperature: 0.09
+  min_temperature: 0.07
+  video_aggregators:
+    - _target_: sv2m.modules.aggregater.LateInteractionAggregator
+      aggregation: "max"
+      use_span_mask: false
+  music_aggregators:
+    - _target_: sv2m.modules.aggregater.LateInteractionAggregator
+      aggregation: ${video_aggregators.0.aggregation}
+      use_span_mask: ${video_aggregators.0.use_span_mask}

@@ -300,3 +300,31 @@ class XPoolAggregator(nn.Module):
             out = F.normalize(out, p=2, dim=-1)
 
         return out, attention_weights
+    
+
+class LateInteractionAggregator(nn.Module):
+    """
+       Mock module of late interaction aggregator for evaluation of retrieval metrics.
+    """
+    def __init__(
+        self,
+        aggregation: str = "max",
+        aggregation_temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        use_span_mask: bool = False,
+    ):
+        super(LateInteractionAggregator, self).__init__()
+        self.use_span_mask = use_span_mask
+        if aggregation not in ["max", "log_sum", "top_k"]:
+            raise ValueError(f"Invalid aggregation method: {aggregation}")
+        if aggregation == "log_sum" and aggregation_temperature is None:
+            raise ValueError("aggregation_temperature must be specified when using 'log_sum' aggregation")
+        if aggregation == "top_k" and top_k is None:
+            raise ValueError("top_k must be specified when using 'top_k' aggregation")
+
+        self.aggregation = aggregation
+        self.aggregation_temperature = aggregation_temperature
+        self.top_k = top_k
+
+    def forward(self) -> None:
+        return None

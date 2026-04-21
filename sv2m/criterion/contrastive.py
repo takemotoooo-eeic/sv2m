@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..distributed import is_distributed_mode
-from ..modules.aggregater import XPoolAggregator
+from ..modules.aggregater import LateInteractionAggregator, XPoolAggregator
 from .distributed import SyncFunction
 
 
@@ -322,6 +322,26 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         self.last_contrastive_loss: float = 0.0
         self.last_distribution_loss: float = 0.0
         self.last_total_loss: float = 0.0
+        self._validate_aggregators(video_aggregators, music_aggregators, distribution_loss)
+
+    def _validate_aggregators(self, video_aggregators: list[nn.Module], music_aggregators: list[nn.Module], distribution_loss: Optional[nn.Module]) -> None:
+        """Validate video and music aggregators for compatibility."""
+        if len(video_aggregators) != len(music_aggregators):
+            raise ValueError("video_aggregators and music_aggregators must have same length")
+        if len(video_aggregators) == 0 or len(music_aggregators) == 0:
+            raise ValueError("at least one aggregator is required")
+        for video_aggregator, music_aggregator in zip(video_aggregators, music_aggregators):
+            if isinstance(video_aggregator, XPoolAggregator):
+                raise ValueError("video_aggregator cannot be XPoolAggregator")
+            if isinstance(music_aggregator, LateInteractionAggregator) and not isinstance(video_aggregator, LateInteractionAggregator):
+                raise ValueError("LateInteractionAggregator must be used for both video_aggregator and music_aggregator")
+            if not isinstance(music_aggregator, LateInteractionAggregator) and isinstance(video_aggregator, LateInteractionAggregator):
+                raise ValueError("LateInteractionAggregator must be used for both video_aggregator and music_aggregator")
+            
+        if distribution_loss is not None:
+            has_xpool = any(isinstance(agg, XPoolAggregator) for agg in music_aggregators)
+            if not has_xpool:
+                raise ValueError("distribution_loss requires at least one XPoolAggregator in music_aggregators")
 
     def forward(
         self,
@@ -363,29 +383,31 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
             device,
         ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids, spans_target)
 
-        similarity_matrix_sum = None
+        similarity_matrixs = []
         attention_weights = None
 
         for video_aggregator, music_aggregator in zip(self.video_aggregators, self.music_aggregators):
-            if isinstance(video_aggregator, XPoolAggregator):
-                raise ValueError("video_aggregator cannot be XPoolAggregator")
-            video_embeddings = video_aggregator.to(device)(global_video_features, global_video_masks)  # [batch_size, embed_dim]
+            if isinstance(video_aggregator, LateInteractionAggregator) and isinstance(music_aggregator, LateInteractionAggregator):
+                # Compute late-interaction similarity matrix
+                similarity_matrix = self.compute_late_interaction_similarity_matrix(
+                    video_features=global_video_features,
+                    music_features=global_music_features,
+                    video_masks=global_video_masks,
+                    music_masks=global_music_masks,
+                    music_span_masks=global_music_span_masks,
+                )
+                similarity_matrixs.append(similarity_matrix)
+            
+            video_embeddings = video_aggregator(global_video_features, global_video_masks)  # [batch_size, embed_dim]
 
             if isinstance(music_aggregator, XPoolAggregator):
-                music_embeddings, attention_weights = music_aggregator.to(device)(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
-            else:
-                music_embeddings = music_aggregator.to(device)(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
-            
-            if isinstance(music_aggregator, XPoolAggregator):
+                music_embeddings, attention_weights = music_aggregator(video_embeddings, global_music_features, global_music_masks, global_music_span_masks)  # [video_batch_size, music_batch_size, embed_dim]
                 similarity_matrix = torch.einsum("vmd,vd->vm", music_embeddings, video_embeddings)  # [video_batch_size, music_batch_size]
             else:
-                similarity_matrix = torch.matmul(video_embeddings, music_embeddings.T)  # [video_batch_size, music_batch_size]
-            
-            if similarity_matrix_sum is None:
-                similarity_matrix_sum = similarity_matrix
-            else:
-                similarity_matrix_sum = similarity_matrix_sum + similarity_matrix
-        similarity_matrix = similarity_matrix_sum / self.temperature
+                music_embeddings = music_aggregator(global_music_features, global_music_masks, global_music_span_masks)  # [batch_size, embed_dim]
+                similarity_matrix = torch.matmul(video_embeddings, music_embeddings.T)  # [video_batch_size, music_batch_size]    
+            similarity_matrixs.append(similarity_matrix)
+        similarity_matrix = torch.mean(torch.stack(similarity_matrixs), dim=0) / self.temperature
         
 
         if is_distributed:
@@ -442,129 +464,6 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
         self.last_distribution_loss = float(distribution_loss.detach().item())
         self.last_total_loss = float(loss.detach().item())
         return loss, attention_weights
-    
-
-
-class CrossModalLateInteractionLoss(_CrossModalContrastiveLoss):
-    """Cross-modal InfoNCE loss for contrastive learning using late interaction.
-
-    InfoNCE (Information Noise Contrastive Estimation) loss is based on mutual information
-    estimation. It explicitly separates positive and negative samples.
-
-    This loss function supports Distributed Data Parallel (DDP) training. When DDP is enabled,
-    embeddings from all processes are gathered to compute the similarity matrix, increasing
-    the effective batch size and number of negative samples.
-
-    Args:
-        temperature (float): Initial temperature parameter for scaling the logits.
-            This becomes a learnable parameter stored as log_temperature.
-        video_aggregators: list of video aggregators
-        music_aggregators: list of music aggregators
-        min_temperature: minimum temperature
-        delete_duplicate: whether to delete duplicate samples
-        reduction (str): Specifies the reduction to apply to the output.
-
-    DDP Usage:
-        This loss function automatically supports both common DDP usage patterns:
-
-        Pattern 1: Wrap only the model with DDP (recommended)
-            Apply `nn.parallel.DistributedDataParallel` only to the model.
-            The loss function will automatically gather embeddings across ranks.
-
-            Example:
-                >>> import torch
-                >>> import torch.distributed as dist
-                >>> from torch.nn.parallel import DistributedDataParallel as DDP
-                >>>
-                >>> # Initialize process group
-                >>> dist.init_process_group(...)
-                >>>
-                >>> # Wrap only the model with DDP
-                >>> model = YourModel().cuda()
-                >>> model = DDP(model, device_ids=[local_rank])
-                >>>
-                >>> # Create loss function (no DDP wrapper needed)
-                >>> criterion = CrossModalInfoNCELoss(temperature=0.1).cuda()
-                >>>
-                >>> # Forward pass
-                >>> music_embedding, text_embedding = model(music_input, text_input)
-                >>> loss = criterion(music_embedding, text_embedding)
-                >>>
-                >>> # Backward pass
-                >>> loss.backward()
-
-        Pattern 2: Wrap both model and criterion together with DDP (also supported)
-            Wrap both model and criterion together in a single module with DDP.
-
-            Example:
-                >>> import torch
-                >>> import torch.distributed as dist
-                >>> from torch.nn.parallel import DistributedDataParallel as DDP
-                >>>
-                >>> # Initialize process group
-                >>> dist.init_process_group(...)
-                >>>
-                >>> # Create a module containing both model and criterion
-                >>> class ModelWithLoss(nn.Module):
-                >>>     def __init__(self):
-                >>>         super().__init__()
-                >>>         self.model = YourModel()
-                >>>         self.criterion = CrossModalInfoNCELoss(temperature=0.1)
-                >>>     def forward(self, music_input, text_input):
-                >>>         music_embedding, text_embedding = self.model(music_input, text_input)
-                >>>         return self.criterion(music_embedding, text_embedding)
-                >>>
-                >>> # Wrap the combined module with DDP
-                >>> model_with_loss = ModelWithLoss().cuda()
-                >>> model_with_loss = DDP(model_with_loss, device_ids=[local_rank])
-                >>>
-                >>> # Forward pass
-                >>> loss = model_with_loss(music_input, text_input)
-                >>>
-                >>> # Backward pass
-                >>> loss.backward()
-
-    Note:
-        - Both usage patterns produce identical results
-        - Pattern 1 (model-only) is simpler and recommended for most use cases
-        - In DDP mode, the effective batch size becomes local_batch_size * world_size
-        - All gradients (model parameters and log_temperature) are automatically synchronized
-    """
-
-    def __init__(
-        self,
-        temperature: float = 0.1,
-        min_temperature: float = 0.01,
-        delete_duplicate: bool = False,
-        use_span_mask: bool = False,
-        aggregation: str = "max",
-        aggregation_temperature: Optional[float] = 0.1,
-        top_k: Optional[int] = None,
-        reduction: str = "mean",
-    ) -> None:
-        super().__init__(
-            video_aggregators=[],
-            music_aggregators=[],
-            temperature=temperature,
-            min_temperature=min_temperature,
-            delete_duplicate=delete_duplicate,
-            reduction=reduction,
-        )
-        self.last_contrastive_loss: float = 0.0
-        self.last_distribution_loss: float = 0.0
-        self.last_total_loss: float = 0.0
-
-        self.use_span_mask = use_span_mask
-        if aggregation not in ["max", "log_sum", "top_k"]:
-            raise ValueError(f"Invalid aggregation method: {aggregation}")
-        if aggregation == "log_sum" and aggregation_temperature is None:
-            raise ValueError("aggregation_temperature must be specified when using 'log_sum' aggregation")
-        if aggregation == "top_k" and top_k is None:
-            raise ValueError("top_k must be specified when using 'top_k' aggregation")
-
-        self.aggregation = aggregation
-        self.aggregation_temperature = aggregation_temperature
-        self.top_k = top_k
 
     def compute_late_interaction_similarity_matrix(
         self,
@@ -599,9 +498,8 @@ class CrossModalLateInteractionLoss(_CrossModalContrastiveLoss):
         video_features = F.normalize(video_features, p=2, dim=-1)
         music_features = F.normalize(music_features, p=2, dim=-1)
 
-
         # Pairwise token similarity: [B_v, B_m, T_v, T_m]
-        similarity = torch.einsum("avd,bmd->abvm", video_features, music_features) # [B_v, B_m, T_v, T_m]
+        similarity = torch.einsum("avd,bmd->abvm", video_features, music_features)  # [B_v, B_m, T_v, T_m]
 
         music_masks = music_masks.to(dtype=torch.bool)
         if self.use_span_mask and music_span_masks is not None:
@@ -613,104 +511,14 @@ class CrossModalLateInteractionLoss(_CrossModalContrastiveLoss):
         if self.aggregation == "max":
             token_scores = similarity.max(dim=-1).values
         elif self.aggregation == "log_sum":
-            token_scores = torch.logsumexp(similarity / self.aggregation_temperature, dim=-1) * self.aggregation_temperature 
+            token_scores = torch.logsumexp(similarity / self.aggregation_temperature, dim=-1) * self.aggregation_temperature
         elif self.aggregation == "top_k":
             top_k = min(self.top_k, similarity.size(-1))
-            token_scores = similarity.topk(k=top_k, dim=-1).values.mean(dim=-1) 
+            token_scores = similarity.topk(k=top_k, dim=-1).values.mean(dim=-1)
         else:
             raise ValueError(f"Invalid aggregation method: {self.aggregation}")
-        
+
         video_masks = video_masks.to(dtype=torch.bool)
         token_scores = token_scores.masked_fill(~video_masks[:, None, :], 0.0)
         valid_video_counts = video_masks.sum(dim=-1, keepdim=True).clamp_min(1).to(token_scores.dtype)  # [B_v, 1]
         return token_scores.sum(dim=-1) / valid_video_counts  # [B_v, B_m]
-
-    def forward(
-        self,
-        music_features: torch.Tensor,
-        music_masks: torch.Tensor,
-        music_span_masks: Optional[torch.Tensor],
-        spans_target: Optional[torch.Tensor],
-        music_ids: Optional[list[str]],
-        video_features: torch.Tensor,
-        video_masks: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Compute InfoNCE loss between music and video features.
-
-        Args:
-            music_features (torch.Tensor):
-                Music features of shape [B, T_m, D] or [B, D].
-            music_masks (torch.Tensor):
-                Music valid-token mask of shape [B, T_m].
-            music_span_masks (Optional[torch.Tensor]):
-                Optional span mask (unused in this loss).
-            spans_target (Optional[torch.Tensor]):
-                Optional span target (unused in this loss).
-            music_ids (Optional[list[str]]):
-                Music IDs for duplicate-negative masking.
-            video_features (torch.Tensor):
-                Video features of shape [B, T_v, D] or [B, D].
-            video_masks (torch.Tensor):
-                Video valid-token mask of shape [B, T_v].
-
-        Returns:
-            Tuple[torch.Tensor, Optional[torch.Tensor]]:
-                (loss, attention_weights). `attention_weights` is always None in late interaction.
-        """
-        (
-            global_music_features,
-            global_music_masks,
-            global_music_span_masks,
-            global_video_features,
-            global_video_masks,
-            global_music_ids,
-            _,
-            local_batch_size,
-            is_distributed,
-            device,
-        ) = self._validate_and_gather_inputs(music_features, music_masks, music_span_masks, video_features, video_masks, music_ids, spans_target)
-
-        attention_weights = None
-
-        
-        # Compute similarity matrix using late interaction.
-        similarity_matrix = self.compute_late_interaction_similarity_matrix(
-            video_features=global_video_features,
-            music_features=global_music_features,
-            video_masks=global_video_masks,
-            music_masks=global_music_masks,
-            music_span_masks=global_music_span_masks,
-        )
-        similarity_matrix = similarity_matrix / self.temperature
-
-        if is_distributed:
-            # In DDP mode, each rank computes loss only on its local batch portion
-            rank = dist.get_rank()
-            labels = torch.arange(rank * local_batch_size, (rank + 1) * local_batch_size, device=device)
-            start_index = rank * local_batch_size
-            end_index = (rank + 1) * local_batch_size
-            local_similarity_v2m = similarity_matrix[start_index:end_index]
-            local_similarity_m2v = similarity_matrix.T[start_index:end_index]
-            duplicate_mask = self._build_duplicate_mask(global_music_ids, start_index, end_index, device)
-        else:
-            labels = torch.arange(local_batch_size, device=device)
-            local_similarity_v2m = similarity_matrix
-            local_similarity_m2v = similarity_matrix.T
-            duplicate_mask = self._build_duplicate_mask(global_music_ids, 0, local_batch_size, device)
-
-        if duplicate_mask is not None:
-            local_similarity_v2m = local_similarity_v2m.masked_fill(duplicate_mask, float("-inf"))
-            local_similarity_m2v = local_similarity_m2v.masked_fill(duplicate_mask.T, float("-inf"))
-
-        # Compute bidirectional cross-entropy loss
-        loss_v2m = F.cross_entropy(local_similarity_v2m, labels, reduction=self.reduction)
-        loss_m2v = F.cross_entropy(local_similarity_m2v, labels, reduction=self.reduction)
-        contrastive_loss = (loss_v2m + loss_m2v) / 2
-        
-        distribution_loss = torch.tensor(0.0, device=device)
-        loss = contrastive_loss + distribution_loss
-
-        self.last_contrastive_loss = float(contrastive_loss.detach().item())
-        self.last_distribution_loss = float(distribution_loss.detach().item())
-        self.last_total_loss = float(loss.detach().item())
-        return loss, attention_weights
