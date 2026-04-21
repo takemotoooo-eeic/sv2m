@@ -231,6 +231,27 @@ class MaDEEvaluator(Driver):
         unwrapped_model = unwrap(self.model)
         loss_fn = unwrapped_model.loss_fn
 
+        def _compute_late_interaction_sim_chunked(
+            video_features: torch.Tensor,
+            music_features: torch.Tensor,
+            video_masks: torch.Tensor,
+            music_masks: torch.Tensor,
+            music_span_masks: torch.Tensor,
+            chunk_size: int,
+        ) -> torch.Tensor:
+            sims = []
+            for start in range(0, video_features.size(0), chunk_size):
+                end = min(start + chunk_size, video_features.size(0))
+                chunk_sim = loss_fn.compute_late_interaction_similarity_matrix(
+                    video_features[start:end],
+                    music_features,
+                    video_masks[start:end],
+                    music_masks,
+                    music_span_masks,
+                )
+                sims.append(chunk_sim)
+            return torch.cat(sims, dim=0)
+
         if loss_fn is not None and len(loss_fn.video_aggregators) > 0:
             similarity_matrix_sum = None
             for video_aggregator, music_aggregator in zip(loss_fn.video_aggregators, loss_fn.music_aggregators):
@@ -251,14 +272,36 @@ class MaDEEvaluator(Driver):
             sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
         
         elif isinstance(loss_fn, CrossModalLateInteractionLoss):
-            sim = loss_fn.compute_late_interaction_similarity_matrix(
-                global_video_features,
-                global_music_features,
-                global_video_masks,
-                global_music_masks,
-                global_music_span_masks,
-            ) / loss_fn.temperature
-            sim_matrix_np = sim.detach().cpu().numpy()
+            late_interaction_chunk_size = int(
+                OmegaConf.select(self.config, "evaluate.late_interaction_query_chunk_size", default=8)
+            )
+
+            if is_distributed_mode():
+                local_video_features_on_device = local_video_features.to(self.device)
+                local_video_masks_on_device = local_video_masks.to(self.device)
+
+                local_sim = _compute_late_interaction_sim_chunked(
+                    local_video_features_on_device,
+                    global_music_features,
+                    local_video_masks_on_device,
+                    global_music_masks,
+                    global_music_span_masks,
+                    late_interaction_chunk_size,
+                ) / loss_fn.temperature
+
+                gathered_local_sims = [None] * dist.get_world_size()
+                dist.all_gather_object(gathered_local_sims, local_sim.detach().cpu())
+                sim_matrix_np = torch.cat(gathered_local_sims, dim=0).numpy()
+            else:
+                sim = _compute_late_interaction_sim_chunked(
+                    global_video_features,
+                    global_music_features,
+                    global_video_masks,
+                    global_music_masks,
+                    global_music_span_masks,
+                    late_interaction_chunk_size,
+                ) / loss_fn.temperature
+                sim_matrix_np = sim.detach().cpu().numpy()
         else:
             raise ValueError("Unsupported loss function for retrieval metrics calculation.")
 
