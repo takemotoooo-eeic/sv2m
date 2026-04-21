@@ -272,9 +272,7 @@ class MaDEEvaluator(Driver):
             sim_matrix_np = similarity_matrix_sum.detach().cpu().numpy()
         
         elif isinstance(loss_fn, CrossModalLateInteractionLoss):
-            late_interaction_chunk_size = int(
-                OmegaConf.select(self.config, "evaluate.late_interaction_query_chunk_size", default=8)
-            )
+            late_interaction_chunk_size = self.config.dataloader.evaluate.batch_size
 
             if is_distributed_mode():
                 local_video_features_on_device = local_video_features.to(self.device)

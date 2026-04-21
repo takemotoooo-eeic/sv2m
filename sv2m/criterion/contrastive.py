@@ -623,7 +623,7 @@ class CrossModalLateInteractionLoss(_CrossModalContrastiveLoss):
         video_masks = video_masks.to(dtype=torch.bool)
         token_scores = token_scores.masked_fill(~video_masks[:, None, :], 0.0)
         valid_video_counts = video_masks.sum(dim=-1, keepdim=True).clamp_min(1).to(token_scores.dtype)  # [B_v, 1]
-        return token_scores.sum(dim=-1) / valid_video_counts.squeeze(-1)  # [B_v]
+        return token_scores.sum(dim=-1) / valid_video_counts  # [B_v, B_m]
 
     def forward(
         self,
