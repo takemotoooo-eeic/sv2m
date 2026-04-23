@@ -536,13 +536,9 @@ class CrossModalInfoNCELoss(_CrossModalContrastiveLoss):
                 spans_target_for_loss = global_spans_target
                 row_offset = 0
 
-            if is_distributed:
-                attention_weights_for_loss = attention_weights[start_index:end_index]
-            else:
-                attention_weights_for_loss = attention_weights
 
             distribution_loss = self.distribution_loss(
-                attention_weights=attention_weights_for_loss,
+                attention_weights=attention_weights,
                 music_masks=global_music_masks,
                 span_target=spans_target_for_loss,
                 positive_col_offset=row_offset,

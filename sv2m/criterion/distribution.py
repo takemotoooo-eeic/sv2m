@@ -89,15 +89,17 @@ class KLDivLoss(nn.Module):
         V, M, S = attention_weights.shape
         attention_weights = attention_weights / attention_weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
 
-        q_uniform = self._create_uniform_window(music_masks) # (M, S)
-        q_span = self._create_span_window(span_target, music_masks) # (V, S)
-
-        target = q_uniform.unsqueeze(0).expand(V, M, S).clone() # (V, M, S)
-
         diag_row_idx = torch.arange(V, device=attention_weights.device)
         diag_col_idx = diag_row_idx + positive_col_offset
         valid = diag_col_idx < M
-        target[diag_row_idx[valid], diag_col_idx[valid]] = q_span[diag_row_idx[valid]]
+
+        q_uniform = self._create_uniform_window(music_masks) # (M, S)
+        target = q_uniform.unsqueeze(0).expand(V, M, S).clone() # (V, M, S)
+
+        if valid.any():
+            positive_music_masks = music_masks[diag_col_idx[valid]]  # (V_valid, S)
+            q_span_valid = self._create_span_window(span_target[valid], positive_music_masks) # (V_valid, S)
+            target[diag_row_idx[valid], diag_col_idx[valid]] = q_span_valid
 
         kl_matrix = F.kl_div(
             input=torch.log(attention_weights.clamp(min=1e-12)),
