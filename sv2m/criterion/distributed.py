@@ -47,11 +47,11 @@ class SyncFunction(torch.autograd.Function):
 
         if sync_grad:
             # Synchronize gradients across all ranks (e.g., for model parameters)
-            gathered_grad_input = gathered_grad_output.clone()
+            gathered_grad_input = gathered_grad_output.contiguous()
             dist.all_reduce(gathered_grad_input, op=dist.ReduceOp.SUM)
 
-            return gathered_grad_input[start_index:end_index], None
+            return gathered_grad_input[start_index:end_index].contiguous(), None
         else:
             # Each rank gets its own portion of gradient without synchronization
             # (e.g., for embeddings in contrastive learning)
-            return gathered_grad_output[start_index:end_index], None
+            return gathered_grad_output[start_index:end_index].contiguous(), None
